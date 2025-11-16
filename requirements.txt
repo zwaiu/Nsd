@@ -1,6 +1,5 @@
-python-telegram-bot==20.7
+python-telegram-bot==13.7
 requests==2.31.0
-aiohttp==3.9.1
-psutil==5.9.6
+fake-useragent==1.4.0
+aiohttp==3.8.5
 urllib3==1.26.18
-fake_useragent
