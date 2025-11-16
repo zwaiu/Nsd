@@ -2270,7 +2270,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
-# ✅ FIXED: Main function - removed the crashing loop
+# ✅ FIXED: Main function - updated to use Application instead of Updater
 def main():
     """Main function to run the bot"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
@@ -2282,13 +2282,14 @@ def main():
     
     cleanup_expired_rentals()
     
-    # ✅ FIXED: Simple application run without crashing loop
     try:
+        # Create application
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Add error handler first
         application.add_error_handler(error_handler)
         
-        # Add handlers
+        # Add command handlers
         application.add_handler(CommandHandler("start", start_checking))
         application.add_handler(CommandHandler("stop", stop_command))
         application.add_handler(CommandHandler("stats", stats_command))
@@ -2310,20 +2311,30 @@ def main():
         application.add_handler(CommandHandler("removeuser", remove_user_command))
         application.add_handler(CommandHandler("removerental", remove_rental_command))
         
+        # Add message handlers
         application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
         
+        # Add callback query handlers
         application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
         application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
         
-        logger.info("✅ Bot is running...")
+        logger.info("✅ Bot handlers registered successfully")
+        logger.info("🤖 Starting bot polling...")
+        
+        # Start polling
         application.run_polling(
             drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
+            allowed_updates=Update.ALL_TYPES,
+            poll_interval=1.0,
+            timeout=20
         )
         
     except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
+        logger.error(f"❌ Bot failed to start: {e}")
+        # Send error notification
+        error_msg = f"🚨 <b>Bot Startup Failed</b>\n\nError: {str(e)}\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
+        send_error_log_sync(error_msg)
 
 if __name__ == "__main__":
     main()
