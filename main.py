@@ -7,14 +7,11 @@ import random
 import os
 import json
 import threading
-import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from datetime import datetime, timedelta
-from html import escape
-import aiohttp
 from queue import Queue
 from fake_useragent import UserAgent
 
@@ -658,7 +655,8 @@ def generate_random_expiry():
     
     return month_str, year_str_4d, year_str_2d
 
-async def get_user_info(user_id):
+def get_user_info(user_id):
+    """Get username and first name for a user ID - synchronous version"""
     try:
         if user_id in user_info_cache:
             return user_info_cache[user_id]
@@ -666,17 +664,16 @@ async def get_user_info(user_id):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat"
         params = {'chat_id': user_id}
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
-            async with session.post(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get('ok'):
-                        user = data['result']
-                        username = user.get('username', 'No username')
-                        first_name = user.get('first_name', 'No name')
-                        user_info = f"@{username}" if username != 'No username' else first_name
-                        user_info_cache[user_id] = user_info
-                        return user_info
+        response = global_session.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                user = data['result']
+                username = user.get('username', 'No username')
+                first_name = user.get('first_name', 'No name')
+                user_info = f"@{username}" if username != 'No username' else first_name
+                user_info_cache[user_id] = user_info
+                return user_info
     except Exception as e:
         logger.error(f"Error getting user info for {user_id}: {e}")
     
@@ -1292,7 +1289,7 @@ def active_command(update, context):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = asyncio.run(get_user_info(session["chat_id"]))
+            user_info = get_user_info(session["chat_id"])
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"👤 {user_info} -  {progress}")
         
@@ -1330,7 +1327,7 @@ def system_command(update, context):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = asyncio.run(get_user_info(session["chat_id"]))
+            user_info = get_user_info(session["chat_id"])
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"• {user_info} - {progress} cards")
         
@@ -1845,7 +1842,7 @@ def list_rentals_command(update, context):
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = asyncio.run(get_user_info(rental_user_id))
+        username = get_user_info(rental_user_id)
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
     safe_send_message_sync(
@@ -1865,7 +1862,7 @@ def list_users_with_names_command(update, context):
         
     users_list = []
     for user_id in AUTHORIZED_USERS:
-        username = asyncio.run(get_user_info(user_id))
+        username = get_user_info(user_id)
         users_list.append(f"👤 {username} (ID: {user_id})")
     
     safe_send_message_sync(
@@ -1886,7 +1883,7 @@ def list_rentals_with_names_command(update, context):
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = asyncio.run(get_user_info(rental_user_id))
+        username = get_user_info(rental_user_id)
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
     safe_send_message_sync(
