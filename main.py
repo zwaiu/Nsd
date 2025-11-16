@@ -9,8 +9,8 @@ import json
 import threading
 import asyncio
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from datetime import datetime, timedelta
 from html import escape
@@ -1040,25 +1040,25 @@ def send_final_results_sync(user_session):
     except Exception as e:
         logger.error(f"Error sending final results: {e}")
 
-async def safe_send_message(update: Update, text: str, parse_mode='HTML', reply_markup=None):
+def safe_send_message_sync(update, text, parse_mode='HTML', reply_markup=None):
     try:
-        await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error sending message: {e}")
 
-async def check_access(update: Update):
+def check_access_sync(update):
     user_id = str(update.effective_user.id)
     if not is_authorized(user_id):
         hours, minutes = get_rental_time_left(user_id)
         if hours > 0 or minutes > 0:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f"🚫 <b>Rental Expired</b>\n\n"
                 f"Your rental access has expired.\n"
                 f"Contact @mcchiatoos to renew your access."
             )
         else:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "🚫 <b>Access Denied</b>\n\n"
                 "You are not authorized to use this bot.\n\n"
@@ -1071,9 +1071,9 @@ async def check_access(update: Update):
         return False
     return True
 
-async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_stop_callback(update, context):
     query = update.callback_query
-    await query.answer()
+    query.answer()
     
     callback_data = query.data
     if callback_data.startswith('stop_masschk_'):
@@ -1103,7 +1103,7 @@ async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     
                     stopped_message = "🛑 Processing Stopped"
                     
-                    await query.edit_message_text(
+                    query.edit_message_text(
                         text=stopped_message,
                         parse_mode='HTML',
                         reply_markup=build_keyboard(task_id, final_counts, session.get("current_card_info"))
@@ -1114,17 +1114,17 @@ async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     
                     return
                 else:
-                    await query.answer("No active checking session found!", show_alert=True)
+                    query.answer("No active checking session found!", show_alert=True)
                     return
         
-        await query.answer("Session not found!", show_alert=True)
+        query.answer("Session not found!", show_alert=True)
 
-async def handle_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_noop_callback(update, context):
     query = update.callback_query
-    await query.answer()
+    query.answer()
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_send_message(
+def start_command(update, context):
+    safe_send_message_sync(
         update,
         " <b>Mang Biroy AUTH</b>\n\n"
         "📁 <b>Send cc.txt file with cards to check.</b>\n\n"
@@ -1133,8 +1133,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "DM @mcchiatoos for any problem"
     )
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def stop_command(update, context):
+    if not check_access_sync(update):
         return
         
     chat_id = update.message.chat_id
@@ -1148,15 +1148,15 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             approved_cards = user_session["processor"].get_approved_cards()
             user_session["processor"].stop_processing()
         
-        await safe_send_message(update, "🛑 Checking stopped!")
+        safe_send_message_sync(update, "🛑 Checking stopped!")
         
         if approved_cards:
             send_approved_cards_file(user_session, approved_cards)
     else:
-        await safe_send_message(update, "❌ No active checking session!")
+        safe_send_message_sync(update, "❌ No active checking session!")
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def stats_command(update, context):
+    if not check_access_sync(update):
         return
         
     chat_id = update.message.chat_id
@@ -1170,7 +1170,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with active_users_lock:
             active_count = active_users_count
         
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f" <b>Current Stats</b>\n\n"
             f"✅ CVV Live: {stats['cvv_live']}\n"
@@ -1181,13 +1181,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f" Total: {total}"
         )
     else:
-        await safe_send_message(update, "❌ No active checking session!")
+        safe_send_message_sync(update, "❌ No active checking session!")
 
-async def myaccess_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def myaccess_command(update, context):
     user_id = str(update.effective_user.id)
     
     if user_id in AUTHORIZED_USERS:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "✅ <b>Permanent Access</b>\n\n"
             "You have permanent access to this bot."
@@ -1209,21 +1209,21 @@ async def myaccess_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             time_left_str = ", ".join(time_left_parts)
             
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f" <b>Rental Access</b>\n\n"
                 f" <b>Time Left:</b> {time_left_str}\n\n"
                 f"Contact @mcchiatoos to renew"
             )
         else:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "🚫 <b>Rental Expired</b>\n\n"
                 "Your rental access has expired.\n"
                 "Contact @mcchiatoos to renew your access."
             )
     else:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "🚫 <b>No Access</b>\n\n"
             "You don't have access to this bot.\n\n"
@@ -1234,12 +1234,12 @@ async def myaccess_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Contact @mcchiatoos for rental access."
         )
 
-async def bin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def bin_command(update, context):
+    if not check_access_sync(update):
         return
         
     if not context.args:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Usage:</b> /bin [BIN]\n\n"
             "Example: <code>/bin 411111</code>"
@@ -1249,7 +1249,7 @@ async def bin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bin_number = context.args[0].strip()
     
     if not bin_number.isdigit() or len(bin_number) != 6:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Invalid BIN</b>\n\n"
             "Please provide a valid 6-digit BIN number.\n"
@@ -1257,7 +1257,7 @@ async def bin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    await safe_send_message(update, "🔍 <b>Looking up BIN information...</b>")
+    safe_send_message_sync(update, "🔍 <b>Looking up BIN information...</b>")
     
     try:
         bin_info = fetch_bin_info(bin_number + "000000")
@@ -1271,18 +1271,18 @@ async def bin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 <b>Bank:</b> {bin_info['Bank']}
 <b>Country:</b> {bin_info['Country']} {bin_info['Emoji']}"""
         
-        await safe_send_message(update, bin_message)
+        safe_send_message_sync(update, bin_message)
         
     except Exception as e:
         logger.error(f"Error in BIN lookup: {e}")
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Error looking up BIN</b>\n\n"
             "Please try again later."
         )
 
-async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def active_command(update, context):
+    if not check_access_sync(update):
         return
         
     with active_users_lock:
@@ -1292,21 +1292,21 @@ async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = await get_user_info(session["chat_id"])
+            user_info = asyncio.run(get_user_info(session["chat_id"]))
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"👤 {user_info} -  {progress}")
         
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f"👥 <b>Active Users</b>\n\n"
             f"Total Active: {active_count}\n\n"
             + "\n".join(user_list)
         )
     else:
-        await safe_send_message(update, "🔍 <b>No active users currently checking.</b>")
+        safe_send_message_sync(update, "🔍 <b>No active users currently checking.</b>")
 
-async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def system_command(update, context):
+    if not check_access_sync(update):
         return
         
     with active_users_lock:
@@ -1330,20 +1330,20 @@ async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = await get_user_info(session["chat_id"])
+            user_info = asyncio.run(get_user_info(session["chat_id"]))
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"• {user_info} - {progress} cards")
         
         system_info += f"\n\n<b>Active Sessions:</b>\n" + "\n".join(user_list)
     
-    await safe_send_message(update, system_info)
+    safe_send_message_sync(update, system_info)
 
-async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def gen_command(update, context):
+    if not check_access_sync(update):
         return
         
     if not context.args:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             " <b>Card Generator</b>\n\n"
             " <b>Usage:</b> /gen [CUSTOM_PREFIX] |[mm]|[yy]|[cvv] [amount] [check/file]\n\n"
@@ -1377,7 +1377,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         has_cvv = False
     
     if not match:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Invalid format!</b>\n\n"
             "✅ <b>Usage:</b> /gen [CUSTOM_PREFIX] |[mm]|[yy]|[cvv] [amount] [check/file]\n\n"
@@ -1423,7 +1423,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = 'file'
     
     if not custom_prefix.isdigit() or len(custom_prefix) < 4 or len(custom_prefix) > 15:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Invalid custom prefix!</b>\n\n"
             "Custom prefix must be 4-15 digits\n\n"
@@ -1446,7 +1446,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             exp_month = f"{exp_month_int:02d}"
             exp_month_display = exp_month
         except ValueError:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "❌ <b>Invalid expiry month!</b>\n\n"
                 "Month must be between 01-12 or 'rnd' for random\n\n"
@@ -1470,7 +1470,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             current_year = datetime.now().year
             if exp_year_int < current_year or exp_year_int > current_year + 10:
-                await safe_send_message(
+                safe_send_message_sync(
                     update,
                     f"⚠️ <b>Expiry year warning!</b>\n\n"
                     f"Year {exp_year_int} seems unrealistic.\n"
@@ -1481,7 +1481,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             exp_year = str(exp_year_int)
             exp_year_display = exp_year_input
         except ValueError:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "❌ <b>Invalid expiry year!</b>\n\n"
                 "Year must be 2 or 4 digits or 'rnd' for random\n\n"
@@ -1494,7 +1494,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if custom_cvv is not None and custom_cvv != 'rnd':
         if not custom_cvv.isdigit():
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "❌ <b>Invalid CVV!</b>\n\n"
                 "CVV must be 3-4 digits or 'rnd' for random\n\n"
@@ -1507,7 +1507,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if custom_prefix.startswith('3'):
             if len(custom_cvv) != 4:
-                await safe_send_message(
+                safe_send_message_sync(
                     update,
                     "❌ <b>Invalid CVV for Amex!</b>\n\n"
                     "Amex cards require 4-digit CVV\n\n"
@@ -1516,7 +1516,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         else:
             if len(custom_cvv) != 3:
-                await safe_send_message(
+                safe_send_message_sync(
                     update,
                     "❌ <b>Invalid CVV for Visa/MasterCard!</b>\n\n"
                     "Visa/MasterCard cards require 3-digit CVV\n\n"
@@ -1530,13 +1530,13 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError("Amount must be positive")
         if amount > 500:
             amount = 500
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f"⚠️ <b>Amount limited to 500 cards</b>\n"
                 f"Generating 500 cards instead of {amount_str}"
             )
     except ValueError:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Invalid amount!</b>\n\n"
             "Amount must be a number between 1-500\n\n"
@@ -1550,7 +1550,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         card_length = 16
     
     if len(custom_prefix) >= card_length:
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f"❌ <b>Custom prefix too long!</b>\n\n"
             f"Your prefix has {len(custom_prefix)} digits but {card_length}-digit cards can only have up to {card_length-1} digits before the check digit.\n\n"
@@ -1560,7 +1560,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     action_display = "Check live" if action == 'check' else "Save to file"
     
-    await safe_send_message(
+    safe_send_message_sync(
         update,
         f"🔄 <b>Generating {amount} cards...</b>\n\n"
         f" <b>Custom Prefix:</b> {custom_prefix}\n"
@@ -1578,7 +1578,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         generated_cards = generate_cards(custom_prefix, amount, card_length)
         
         if not generated_cards:
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "❌ <b>Failed to generate cards!</b>\n\n"
                 "Please check your custom prefix and try again."
@@ -1616,7 +1616,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if action == 'check':
             if not can_accept_new_user():
-                await safe_send_message(
+                safe_send_message_sync(
                     update,
                     "🚫 <b>System Busy</b>\n\n"
                     "Too many users are currently checking cards.\n"
@@ -1629,7 +1629,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 return
             
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f" <b>Starting live check for {len(cards_with_details)} generated cards...</b>"
             )
@@ -1638,7 +1638,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_session = get_user_session(chat_id)
             
             if user_session["checking"]:
-                await safe_send_message(update, "❌ Please stop current checking first using /stop")
+                safe_send_message_sync(update, "❌ Please stop current checking first using /stop")
                 try:
                     os.remove(filename)
                 except:
@@ -1687,7 +1687,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with active_users_lock:
                 active_count = active_users_count
             
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f"✅ Generated {len(cards_with_details)} cards and started live check!\n"
                 f"👥 Active users: {active_count + 1}/{MAX_CONCURRENT_USERS}\n"
@@ -1701,7 +1701,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             year_info = "Random year for each card" if random_year else f"Fixed year: {exp_year_display}"
             
             with open(filename, 'rb') as f:
-                await context.bot.send_document(
+                context.bot.send_document(
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=filename,
@@ -1726,7 +1726,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Error in gen_command: {e}")
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             "❌ <b>Error generating cards!</b>\n\n"
             "Please try again with a different custom prefix."
@@ -1738,7 +1738,7 @@ async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-async def cmds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def cmds_command(update, context):
     user_id = str(update.effective_user.id)
     
     message = "🤖 <b>Available Commands</b>\n\n"
@@ -1772,35 +1772,35 @@ async def cmds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message += "DM @mcchiatoos for any problem"
     
-    await safe_send_message(update, message)
+    safe_send_message_sync(update, message)
 
 # Admin commands
-async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def add_user_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        await safe_send_message(update, "❌ Usage: /adduser [user_id]")
+        safe_send_message_sync(update, "❌ Usage: /adduser [user_id]")
         return
         
     new_user_id = context.args[0]
     if new_user_id in AUTHORIZED_USERS:
-        await safe_send_message(update, "❌ User already exists!")
+        safe_send_message_sync(update, "❌ User already exists!")
         return
         
     AUTHORIZED_USERS.append(new_user_id)
-    await safe_send_message(update, f"✅ User {new_user_id} added successfully!")
+    safe_send_message_sync(update, f"✅ User {new_user_id} added successfully!")
 
-async def add_rental_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def add_rental_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if len(context.args) < 2:
-        await safe_send_message(update, "❌ Usage: /addrental [user_id] [days]")
+        safe_send_message_sync(update, "❌ Usage: /addrental [user_id] [days]")
         return
         
     rental_user_id = context.args[0]
@@ -1808,165 +1808,165 @@ async def add_rental_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         days = int(context.args[1])
         expiry_time = add_rental(rental_user_id, days)
         
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f"✅ Rental added for user {rental_user_id}\n"
             f"📅 Duration: {days} day(s)"
         )
     except ValueError:
-        await safe_send_message(update, "❌ Invalid days format!")
+        safe_send_message_sync(update, "❌ Invalid days format!")
 
-async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def list_users_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not AUTHORIZED_USERS:
-        await safe_send_message(update, "❌ No authorized users!")
+        safe_send_message_sync(update, "❌ No authorized users!")
         return
         
     users_list = "\n".join(AUTHORIZED_USERS)
-    await safe_send_message(
+    safe_send_message_sync(
         update,
         f"👑 <b>Authorized Users</b>\n\n{users_list}"
     )
 
-async def list_rentals_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def list_rentals_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not USER_RENTALS:
-        await safe_send_message(update, "❌ No active rentals!")
+        safe_send_message_sync(update, "❌ No active rentals!")
         return
         
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = await get_user_info(rental_user_id)
+        username = asyncio.run(get_user_info(rental_user_id))
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
-    await safe_send_message(
+    safe_send_message_sync(
         update,
         f"💳 <b>Active Rentals</b>\n\n" + "\n".join(rentals_list)
     )
 
-async def list_users_with_names_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def list_users_with_names_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not AUTHORIZED_USERS:
-        await safe_send_message(update, "❌ No authorized users!")
+        safe_send_message_sync(update, "❌ No authorized users!")
         return
         
     users_list = []
     for user_id in AUTHORIZED_USERS:
-        username = await get_user_info(user_id)
+        username = asyncio.run(get_user_info(user_id))
         users_list.append(f"👤 {username} (ID: {user_id})")
     
-    await safe_send_message(
+    safe_send_message_sync(
         update,
         f"👑 <b>Authorized Users with Names</b>\n\n" + "\n".join(users_list)
     )
 
-async def list_rentals_with_names_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def list_rentals_with_names_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not USER_RENTALS:
-        await safe_send_message(update, "❌ No active rentals!")
+        safe_send_message_sync(update, "❌ No active rentals!")
         return
         
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = await get_user_info(rental_user_id)
+        username = asyncio.run(get_user_info(rental_user_id))
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
-    await safe_send_message(
+    safe_send_message_sync(
         update,
         f"💳 <b>Active Rentals with Names</b>\n\n" + "\n".join(rentals_list)
     )
 
-async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def remove_user_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        await safe_send_message(update, "❌ Usage: /removeuser [user_id]")
+        safe_send_message_sync(update, "❌ Usage: /removeuser [user_id]")
         return
         
     remove_user_id = context.args[0]
     if remove_user_id in AUTHORIZED_USERS:
         AUTHORIZED_USERS.remove(remove_user_id)
-        await safe_send_message(update, f"✅ User {remove_user_id} removed!")
+        safe_send_message_sync(update, f"✅ User {remove_user_id} removed!")
     else:
-        await safe_send_message(update, "❌ User not found!")
+        safe_send_message_sync(update, "❌ User not found!")
 
-async def remove_rental_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def remove_rental_command(update, context):
     user_id = str(update.effective_user.id)
     if user_id != ADMIN_ID:
-        await safe_send_message(update, "❌ Admin only command!")
+        safe_send_message_sync(update, "❌ Admin only command!")
         return
         
     if not context.args:
-        await safe_send_message(update, "❌ Usage: /removerental [user_id]")
+        safe_send_message_sync(update, "❌ Usage: /removerental [user_id]")
         return
         
     remove_user_id = context.args[0]
     if remove_rental(remove_user_id):
-        await safe_send_message(update, f"✅ Rental removed for user {remove_user_id}!")
+        safe_send_message_sync(update, f"✅ Rental removed for user {remove_user_id}!")
     else:
-        await safe_send_message(update, "❌ Rental not found!")
+        safe_send_message_sync(update, "❌ Rental not found!")
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_access(update):
+def handle_file(update, context):
+    if not check_access_sync(update):
         return
         
     chat_id = update.message.chat_id
     user_session = get_user_session(chat_id)
     
     if user_session["checking"]:
-        await safe_send_message(update, "❌ Please stop current checking first using /stop")
+        safe_send_message_sync(update, "❌ Please stop current checking first using /stop")
         return
         
     document = update.message.document
     if document.file_name.endswith('.txt'):
-        file = await context.bot.get_file(document.file_id)
+        file = context.bot.get_file(document.file_id)
         file_path = f"cc_{chat_id}.txt"
-        await file.download_to_drive(file_path)
+        file.download(file_path)
         
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f"✅ File received: {document.file_name}\n"
             f"Use /start to begin checking\n"
             f"Max cards: {MAX_CARDS_LIMIT}"
         )
     else:
-        await safe_send_message(update, "❌ Please upload a .txt file")
+        safe_send_message_sync(update, "❌ Please upload a .txt file")
 
-async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start_checking(update, context):
     try:
-        if not await check_access(update):
+        if not check_access_sync(update):
             return
             
         chat_id = update.message.chat_id
         user_session = get_user_session(chat_id)
         
         if user_session["checking"]:
-            await safe_send_message(update, "❌ You already have a checking session in progress! Use /stop to stop first.")
+            safe_send_message_sync(update, "❌ You already have a checking session in progress! Use /stop to stop first.")
             return
         
         if not can_accept_new_user():
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "🚫 <b>System Busy</b>\n\n"
                 "Too many users are currently checking cards.\n"
@@ -1977,7 +1977,7 @@ async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_file = f"cc_{chat_id}.txt"
         if not os.path.exists(user_file):
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 "📁 <b>Send cc.txt file with cards to check.</b>\n\n"
                 "Format:\n<code>card|mm|yy|cvv</code>\n\n"
@@ -1990,16 +1990,16 @@ async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cards = [line.strip() for line in f if line.strip()]
         except Exception as e:
             logger.error(f"Error reading card file: {e}")
-            await safe_send_message(update, "❌ Error reading your card file!")
+            safe_send_message_sync(update, "❌ Error reading your card file!")
             return
         
         if not cards:
-            await safe_send_message(update, "❌ No cards found in your file!")
+            safe_send_message_sync(update, "❌ No cards found in your file!")
             return
         
         if len(cards) > MAX_CARDS_LIMIT:
             cards = cards[:MAX_CARDS_LIMIT]
-            await safe_send_message(
+            safe_send_message_sync(
                 update,
                 f"⚠️ <b>Maximum card limit applied!</b>\n\n"
                 f"Only the first {MAX_CARDS_LIMIT} cards will be checked.\n"
@@ -2049,7 +2049,7 @@ async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with active_users_lock:
             active_count = active_users_count
         
-        await safe_send_message(
+        safe_send_message_sync(
             update,
             f"✅ Checking started! Processing {len(cards)} cards.\n"
             f"👥 Active users: {active_count + 1}/{MAX_CONCURRENT_USERS}\n"
@@ -2059,9 +2059,9 @@ async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error in start_checking: {e}")
-        await safe_send_message(update, "❌ An error occurred while starting the check.")
+        safe_send_message_sync(update, "❌ An error occurred while starting the check.")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def error_handler(update, context):
     logger.error("Exception while handling an update:", exc_info=context.error)
     
     error_msg = f"⚠️ <b>Bot Error</b>\n\n"
@@ -2078,7 +2078,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if update and update.effective_chat:
-            await context.bot.send_message(
+            context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="❌ An error occurred while processing your request. Please try again.",
                 parse_mode='HTML'
@@ -2086,7 +2086,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
-# ✅ FIXED: Updated main function with proper error handling
+# ✅ FIXED: Using older Updater pattern instead of Application
 def main():
     """Main function to run the bot"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
@@ -2099,61 +2099,56 @@ def main():
     cleanup_expired_rentals()
     
     try:
-        # Create application with connection pooling
-        application = (
-            Application.builder()
-            .token(BOT_TOKEN)
-            .pool_timeout(30)
-            .connect_timeout(30)
-            .read_timeout(30)
-            .write_timeout(30)
-            .build()
-        )
+        # Create updater with the bot token
+        updater = Updater(BOT_TOKEN, use_context=True)
+        
+        # Get the dispatcher to register handlers
+        dp = updater.dispatcher
         
         # Add error handler
-        application.add_error_handler(error_handler)
+        dp.add_error_handler(error_handler)
         
         # Add command handlers
-        application.add_handler(CommandHandler("start", start_checking))
-        application.add_handler(CommandHandler("stop", stop_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("myaccess", myaccess_command))
-        application.add_handler(CommandHandler("bin", bin_command))
-        application.add_handler(CommandHandler("gen", gen_command))
-        application.add_handler(CommandHandler("active", active_command))
-        application.add_handler(CommandHandler("system", system_command))
-        application.add_handler(CommandHandler("cmds", cmds_command))
-        application.add_handler(CommandHandler("help", cmds_command))
+        dp.add_handler(CommandHandler("start", start_checking))
+        dp.add_handler(CommandHandler("stop", stop_command))
+        dp.add_handler(CommandHandler("stats", stats_command))
+        dp.add_handler(CommandHandler("myaccess", myaccess_command))
+        dp.add_handler(CommandHandler("bin", bin_command))
+        dp.add_handler(CommandHandler("gen", gen_command))
+        dp.add_handler(CommandHandler("active", active_command))
+        dp.add_handler(CommandHandler("system", system_command))
+        dp.add_handler(CommandHandler("cmds", cmds_command))
+        dp.add_handler(CommandHandler("help", cmds_command))
         
         # Add admin commands
-        application.add_handler(CommandHandler("adduser", add_user_command))
-        application.add_handler(CommandHandler("addrental", add_rental_command))
-        application.add_handler(CommandHandler("listusers", list_users_command))
-        application.add_handler(CommandHandler("listrentals", list_rentals_command))
-        application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
-        application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
-        application.add_handler(CommandHandler("removeuser", remove_user_command))
-        application.add_handler(CommandHandler("removerental", remove_rental_command))
+        dp.add_handler(CommandHandler("adduser", add_user_command))
+        dp.add_handler(CommandHandler("addrental", add_rental_command))
+        dp.add_handler(CommandHandler("listusers", list_users_command))
+        dp.add_handler(CommandHandler("listrentals", list_rentals_command))
+        dp.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
+        dp.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
+        dp.add_handler(CommandHandler("removeuser", remove_user_command))
+        dp.add_handler(CommandHandler("removerental", remove_rental_command))
         
         # Add message handlers
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+        dp.add_handler(MessageHandler(Filters.document, handle_file))
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, start_command))
         
         # Add callback query handlers
-        application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
-        application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
+        dp.add_handler(CallbackQueryHandler(handle_stop_callback, pattern='stop_masschk_'))
+        dp.add_handler(CallbackQueryHandler(handle_noop_callback, pattern='noop'))
         
         logger.info("✅ Bot handlers registered successfully")
         logger.info("🤖 Starting bot polling...")
         
-        # Start polling with proper configuration
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            poll_interval=1.0,
-            timeout=30,
-            close_loop=False
-        )
+        # Start the Bot
+        updater.start_polling()
+        
+        # Run the bot until you press Ctrl-C or the process receives SIGINT,
+        # SIGTERM or SIGABRT. This should be used most of the time, since
+        # start_polling() is non-blocking and will stop the bot gracefully.
+        logger.info("✅ Bot is now running and polling...")
+        updater.idle()
         
     except Exception as e:
         logger.error(f"❌ Bot failed to start: {e}")
