@@ -31,23 +31,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Bot configuration
-BOT_TOKEN = "7455342894:AAEJZQdAcICd13uimGrUH1EVIRV1M36uyF8"
-ADMIN_ID = "6764941964"
+# ✅ FIXED: Environment variables instead of hardcoded tokens
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7455342894:AAEJZQdAcICd13uimGrUH1EVIRV1M36uyF8")
+ADMIN_ID = os.getenv('ADMIN_ID', "6764941964")
 
 # LOGGING BOT CONFIGURATION - Separate bot for error logs
-LOGS_BOT_TOKEN = "8389604020:AAHLgIqB3tapLL98F-qZvXi-2dADakCbjfs"
-LOGS_CHAT_ID = "6764941964"
+LOGS_BOT_TOKEN = os.getenv('LOGS_BOT_TOKEN', "8389604020:AAHLgIqB3tapLL98F-qZvXi-2dADakCbjfs")
+LOGS_CHAT_ID = os.getenv('LOGS_CHAT_ID', "6764941964")
 
 # BIN API Configuration
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
 # OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
-GLOBAL_MAX_WORKERS = 100
+GLOBAL_MAX_WORKERS = 50  # Reduced for Render
 USER_MAX_WORKERS = 2
 REQUEST_TIMEOUT = 12
 TELEGRAM_TIMEOUT = 8
-MAX_CONCURRENT_USERS = 5
+MAX_CONCURRENT_USERS = 3  # Reduced for Render
 
 # List of authorized user IDs
 AUTHORIZED_USERS = [
@@ -141,15 +141,15 @@ API_URLS = [
 ]
 
 # Maximum cards limit
-MAX_CARDS_LIMIT = 500
+MAX_CARDS_LIMIT = 300  # Reduced for Render
 
 # OPTIMIZED: Connection pooling with session reuse for HIGH performance
 def create_session():
     """Create a requests session with connection pooling"""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=50,
-        pool_maxsize=200,
+        pool_connections=20,  # Reduced for Render
+        pool_maxsize=50,     # Reduced for Render
         max_retries=1,
         pool_block=False
     )
@@ -2270,65 +2270,60 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
+# ✅ FIXED: Main function - removed the crashing loop
 def main():
-    """Main function to run the bot with optimized multi-user performance"""
+    """Main function to run the bot"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
     logger.info(f"✅ Authorized users: {AUTHORIZED_USERS}")
     logger.info(f"📊 Maximum cards per check: {MAX_CARDS_LIMIT}")
     logger.info(f"⚙️ Global thread pool workers: {GLOBAL_MAX_WORKERS}")
     logger.info(f"👤 User thread pool workers: {USER_MAX_WORKERS}")
     logger.info(f"👥 Max concurrent users: {MAX_CONCURRENT_USERS}")
-    logger.info(f"⏰ Request timeout: {REQUEST_TIMEOUT}s")
-    logger.info(f"💡 System optimized for 5 users with approved cards results file")
     
     cleanup_expired_rentals()
     
-    while True:
-        try:
-            application = Application.builder().token(BOT_TOKEN).build()
-            
-            application.add_error_handler(error_handler)
-            
-            # Add handlers
-            application.add_handler(CommandHandler("start", start_checking))
-            application.add_handler(CommandHandler("stop", stop_command))
-            application.add_handler(CommandHandler("stats", stats_command))
-            application.add_handler(CommandHandler("myaccess", myaccess_command))
-            application.add_handler(CommandHandler("bin", bin_command))
-            application.add_handler(CommandHandler("gen", gen_command))
-            application.add_handler(CommandHandler("active", active_command))
-            application.add_handler(CommandHandler("system", system_command))
-            application.add_handler(CommandHandler("cmds", cmds_command))
-            application.add_handler(CommandHandler("help", cmds_command))
-            
-            # Add admin commands
-            application.add_handler(CommandHandler("adduser", add_user_command))
-            application.add_handler(CommandHandler("addrental", add_rental_command))
-            application.add_handler(CommandHandler("listusers", list_users_command))
-            application.add_handler(CommandHandler("listrentals", list_rentals_command))
-            application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
-            application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
-            application.add_handler(CommandHandler("removeuser", remove_user_command))
-            application.add_handler(CommandHandler("removerental", remove_rental_command))
-            
-            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
-            
-            application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
-            application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
-            
-            logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
-            application.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-                poll_interval=1.0,
-                timeout=20
-            )
-            
-        except Exception as e:
-            logger.error(f"Bot crashed with error: {e}")
-            logger.info("🔄 Restarting bot in 5 seconds...")
-            time.sleep(5)
+    # ✅ FIXED: Simple application run without crashing loop
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        application.add_error_handler(error_handler)
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_checking))
+        application.add_handler(CommandHandler("stop", stop_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("myaccess", myaccess_command))
+        application.add_handler(CommandHandler("bin", bin_command))
+        application.add_handler(CommandHandler("gen", gen_command))
+        application.add_handler(CommandHandler("active", active_command))
+        application.add_handler(CommandHandler("system", system_command))
+        application.add_handler(CommandHandler("cmds", cmds_command))
+        application.add_handler(CommandHandler("help", cmds_command))
+        
+        # Add admin commands
+        application.add_handler(CommandHandler("adduser", add_user_command))
+        application.add_handler(CommandHandler("addrental", add_rental_command))
+        application.add_handler(CommandHandler("listusers", list_users_command))
+        application.add_handler(CommandHandler("listrentals", list_rentals_command))
+        application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
+        application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
+        application.add_handler(CommandHandler("removeuser", remove_user_command))
+        application.add_handler(CommandHandler("removerental", remove_rental_command))
+        
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+        
+        application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
+        application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
+        
+        logger.info("✅ Bot is running...")
+        application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+        
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
 
 if __name__ == "__main__":
     main()
