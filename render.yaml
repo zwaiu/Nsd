@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: telegram-bot
+    name: main.py
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
