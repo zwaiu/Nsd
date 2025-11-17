@@ -146,7 +146,7 @@ API_URLS = [
 ]
 
 # Maximum cards limit
-MAX_CARDS_LIMIT = 500
+MAX_CARDS_LIMIT = 300
 
 # OPTIMIZED: Connection pooling with session reuse for HIGH performance
 def create_session():
