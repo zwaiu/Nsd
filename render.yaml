@@ -3,10 +3,6 @@ services:
     name: telegram-bot
     env: python
     plan: free
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-    startCommand: python your_bot_file.py
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.8
+    buildCommand: pip install -r requirements.txt
+    startCommand: python your_bot_file_name.py
+    pythonVersion: "3.11.9"
