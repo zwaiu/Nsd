@@ -2320,11 +2320,8 @@ def main():
             
             logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
             
-            # FIXED: Updated polling method for v20+ - removed problematic parameters
-            application.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES
-            )
+            # FIXED: COMPLETELY SIMPLIFIED polling method for v20+
+            application.run_polling()
             
         except Exception as e:
             logger.error(f"Bot crashed with error: {e}")
