@@ -49,7 +49,7 @@ LOGS_CHAT_ID = "6764941964"
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
 # OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
-GLOBAL_MAX_WORKERS = 100
+GLOBAL_MAX_WORKERS = 50
 USER_MAX_WORKERS = 2
 REQUEST_TIMEOUT = 12
 TELEGRAM_TIMEOUT = 8
