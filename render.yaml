@@ -1,8 +1,7 @@
 services:
-  - type: web
-    name: main.py
+  - type: worker
+    name: mang-biroy-bot
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python your_bot_file_name.py
-    pythonVersion: "3.11.9"
+    startCommand: python main.py
+    plan: free
