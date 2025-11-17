@@ -2291,7 +2291,7 @@ def main():
             application.add_error_handler(error_handler)
             
             # Add handlers
-            application.add_handler(CommandHandler("start", start_checking))
+            application.add_handler(CommandHandler("start", start_command))
             application.add_handler(CommandHandler("stop", stop_command))
             application.add_handler(CommandHandler("stats", stats_command))
             application.add_handler(CommandHandler("myaccess", myaccess_command))
@@ -2313,18 +2313,17 @@ def main():
             application.add_handler(CommandHandler("removerental", remove_rental_command))
             
             application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
             
             application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
             
             logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
             
-            # FIXED: Updated polling method for v20+
+            # FIXED: Updated polling method for v20+ - removed problematic parameters
             application.run_polling(
                 drop_pending_updates=True,
-                allowed_updates=Update.ALL_TYPES,
-                close_loop=False
+                allowed_updates=Update.ALL_TYPES
             )
             
         except Exception as e:
