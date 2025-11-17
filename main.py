@@ -8,9 +8,18 @@ import os
 import json
 import threading
 import asyncio
-# FIXED: Updated imports for python-telegram-bot v20+
+
+# FIXED: Use a different approach - import specific components to avoid the Updater issue
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes, 
+    CallbackQueryHandler
+)
+
 from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from datetime import datetime, timedelta
@@ -2277,17 +2286,18 @@ def main():
     
     cleanup_expired_rentals()
     
-    # FIXED: Updated application builder for python-telegram-bot v20+
+    # FIXED: COMPLETELY NEW APPROACH - Use ApplicationBuilder directly
     while True:
         try:
-            # Create application with proper configuration
+            # Create application using ApplicationBuilder (more compatible)
             application = (
-                Application.builder()
+                ApplicationBuilder()
                 .token(BOT_TOKEN)
                 .concurrent_updates(True)
                 .build()
             )
             
+            # Add error handler
             application.add_error_handler(error_handler)
             
             # Add handlers
@@ -2320,7 +2330,7 @@ def main():
             
             logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
             
-            # FIXED: COMPLETELY SIMPLIFIED polling method for v20+
+            # FIXED: Use the most basic polling approach
             application.run_polling()
             
         except Exception as e:
