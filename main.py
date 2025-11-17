@@ -19,6 +19,7 @@ import aiohttp
 from queue import Queue
 from fake_useragent import UserAgent
 from urllib.parse import urlencode, urljoin
+from flask import Flask, jsonify
 
 # Disable warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -2311,6 +2312,33 @@ def async_error_handler(loop, context):
     except:
         pass
 
+# Health server for Render
+def create_health_server():
+    """Create a simple health check server for Render"""
+    app = Flask(__name__)
+    
+    @app.route('/')
+    def health_check():
+        return jsonify({
+            "status": "online", 
+            "service": "Mang Biroy Telegram Bot",
+            "timestamp": datetime.now().isoformat(),
+            "active_users": active_users_count
+        })
+    
+    @app.route('/health')
+    def health():
+        return jsonify({"status": "healthy", "active_users": active_users_count})
+    
+    # Run in a separate thread
+    def run_server():
+        port = int(os.environ.get('PORT', 10000))
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    logger.info(f"✅ Health server started on port {os.environ.get('PORT', 10000)}")
+
 # FIXED: Main function with proper asyncio event loop handling
 def main():
     """Main function to run the bot with optimized multi-user performance"""
@@ -2322,6 +2350,9 @@ def main():
     logger.info(f"👥 Max concurrent users: {MAX_CONCURRENT_USERS}")
     logger.info(f"⏰ Request timeout: {REQUEST_TIMEOUT}s")
     logger.info(f"💡 System optimized for 5 users with approved cards results file")
+    
+    # Start health server for Render
+    create_health_server()
     
     cleanup_expired_rentals()
     
