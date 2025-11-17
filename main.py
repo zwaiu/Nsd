@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 import urllib3
 from datetime import datetime, timedelta
 from html import escape
-import aiohttp
 from queue import Queue
 from fake_useragent import UserAgent
 
