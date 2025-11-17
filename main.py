@@ -282,9 +282,45 @@ class UserCardProcessor:
                 
             except Exception as e:
                 continue
+
+    # NEW METHOD: Send live card immediately when found
+    def _send_live_card_immediately(self, card, bin_info, card_type):
+        """Send live card immediately to user"""
+        try:
+            chat_id = self.user_session["chat_id"]
+            
+            # Extract card components
+            card_parts = card.split('|')
+            if len(card_parts) >= 4:
+                number, exp_month, exp_year, cvv = card_parts[:4]
+                
+                # Generate random time between 1-10 seconds
+                time_taken = random.randint(1, 10)
+                
+                # Determine status text based on card type
+                status_text = "Approved ✅" if card_type == 'cvv_live' else "CCN Live 🔵"
+                
+                # Format exactly as requested with bold BIN info
+                message = f"""Card: {number}|{exp_month}|{exp_year}|{cvv}
+Status: {status_text}
+Response: Card added
+
+<b>BIN:</b> {bin_info.get('BIN', number[:6])}
+<b>Brand:</b> {bin_info.get('Brand', 'UNKNOWN')}
+<b>Type:</b> {bin_info.get('Type', 'UNKNOWN')}
+<b>Bank:</b> {bin_info.get('Bank', 'UNKNOWN BANK')}
+<b>Country:</b> {bin_info.get('Country', 'UNKNOWN COUNTRY')}
+
+Time: {time_taken}s"""
+                
+                # Send the live card immediately
+                send_telegram_message_sync(message, chat_id, parse_mode='HTML')
+                
+        except Exception as e:
+            logger.error(f"Error sending live card immediately: {e}")
                 
     def _process_single_card(self, card, headers, worker_id):
-        """Process a single card - MODIFIED: Send approved cards in exact format"""
+        """Process a single card - MODIFIED: Send live cards immediately"""
         if not self.user_session.get("checking", False):
             return
             
@@ -366,14 +402,8 @@ class UserCardProcessor:
                             with active_users_lock:
                                 self.user_session["stats"]["ccn_live"] += 1
                             bin_info = fetch_bin_info(number)
-                            approved_card_info = {
-                                'card': card,
-                                'status': 'ccn_live',
-                                'message': 'CCN LIVE: Incorrect CVC',
-                                'bin_info': bin_info
-                            }
-                            with self.processing_lock:
-                                self.approved_cards.append(approved_card_info)
+                            # SEND LIVE CARD IMMEDIATELY
+                            self._send_live_card_immediately(card, bin_info, 'ccn_live')
                             with active_users_lock:
                                 self.user_session["current_index"] += 1
                             return
@@ -443,26 +473,14 @@ class UserCardProcessor:
                     if result['status'] == 'cvv_live':
                         with active_users_lock:
                             self.user_session["stats"]["cvv_live"] += 1
-                        approved_card_info = {
-                            'card': card,
-                            'status': 'cvv_live',
-                            'message': result['rawMessage'],
-                            'bin_info': bin_info
-                        }
-                        with self.processing_lock:
-                            self.approved_cards.append(approved_card_info)
+                        # SEND LIVE CARD IMMEDIATELY
+                        self._send_live_card_immediately(card, bin_info, 'cvv_live')
                             
                     elif result['status'] == 'ccn_live':
                         with active_users_lock:
                             self.user_session["stats"]["ccn_live"] += 1
-                        approved_card_info = {
-                            'card': card,
-                            'status': 'ccn_live',
-                            'message': result['rawMessage'],
-                            'bin_info': bin_info
-                        }
-                        with self.processing_lock:
-                            self.approved_cards.append(approved_card_info)
+                        # SEND LIVE CARD IMMEDIATELY
+                        self._send_live_card_immediately(card, bin_info, 'ccn_live')
                         
                     # EVERYTHING ELSE IS DECLINED
                     else:
@@ -505,47 +523,6 @@ class UserCardProcessor:
         except Exception as e:
             logger.error(f"Error saving declined card: {e}")
 
-# NEW FUNCTION: Send approved cards in the exact format
-def send_approved_cards_file(user_session, approved_cards):
-    """Send approved cards in the exact format without file"""
-    try:
-        chat_id = user_session["chat_id"]
-        total_approved = len(approved_cards)
-        
-        # Only send if there are approved cards
-        if total_approved > 0:
-            for card_info in approved_cards:
-                card = card_info['card']
-                status = card_info['status']
-                bin_info = card_info.get('bin_info', {})
-                
-                # Extract card components
-                card_parts = card.split('|')
-                if len(card_parts) >= 4:
-                    number, exp_month, exp_year, cvv = card_parts[:4]
-                    
-                    # Generate random time between 1-10 seconds
-                    time_taken = random.randint(1, 10)
-                    
-                    # Format exactly as requested with bold BIN info
-                    message = f"""Card: {number}|{exp_month}|{exp_year}|{cvv}
-Status: Approved ✅
-Response: Card added
-
-<b>BIN:</b> {bin_info.get('BIN', number[:6])}
-<b>Brand:</b> {bin_info.get('Brand', 'UNKNOWN')}
-<b>Type:</b> {bin_info.get('Type', 'UNKNOWN')}
-<b>Bank:</b> {bin_info.get('Bank', 'UNKNOWN BANK')}
-<b>Country:</b> {bin_info.get('Country', 'UNKNOWN COUNTRY')}
-
-Time: {time_taken}s"""
-                    
-                    # Send each approved card individually
-                    send_telegram_message_sync(message, chat_id, parse_mode='HTML')
-            
-    except Exception as e:
-        logger.error(f"Error sending approved cards: {e}")
-
 # MODIFIED: Build keyboard without insufficient funds and 3DS/OTP
 def build_keyboard(task_id, counts, current_card_info):
     """Builds the inline keyboard for the mass check UI."""
@@ -576,7 +553,7 @@ def build_keyboard(task_id, counts, current_card_info):
 
 # FIXED: checking_thread with better error handling and resource management
 def checking_thread(user_session):
-    """Optimized checking thread that sends approved cards file after completion"""
+    """Optimized checking thread that sends live cards immediately"""
     try:
         # Mark user as active
         with active_users_lock:
@@ -612,16 +589,10 @@ def checking_thread(user_session):
                 
             time.sleep(0.5)  # Increased sleep to reduce CPU usage
             
-        # MODIFIED: Send approved cards in exact format after completion
+        # MODIFIED: No file sending at the end - cards are sent immediately when found
         if user_session.get("checking", False):
-            # Get approved cards from processor
-            approved_cards = processor.get_approved_cards()
-            
             # Update progress with final results
             update_progress_message_sync(user_session)
-            
-            # Send approved cards in exact format (no file, just messages)
-            send_approved_cards_file(user_session, approved_cards)
             
             # Send final results
             send_final_results_sync(user_session)
@@ -1188,7 +1159,7 @@ async def check_access(update: Update):
 
 # FIXED: Handle stop button callback with better thread safety
 async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle stop button callback - preserve statistics display and send approved cards"""
+    """Handle stop button callback - preserve statistics display"""
     query = update.callback_query
     await query.answer()
     
@@ -1204,10 +1175,8 @@ async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     stats = session["stats"]
                     total = stats["total"]
                     
-                    # MODIFIED: Get approved cards from processor before stopping
-                    approved_cards = []
+                    # Stop processor
                     if session.get("processor"):
-                        approved_cards = session["processor"].get_approved_cards()
                         session["processor"].stop_processing()
                     
                     final_counts = {
@@ -1226,10 +1195,6 @@ async def handle_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                         parse_mode='HTML',
                         reply_markup=build_keyboard(task_id, final_counts, session.get("current_card_info"))
                     )
-                    
-                    # NEW: Send approved cards after stopping
-                    if approved_cards:
-                        send_approved_cards_file(session, approved_cards)
                     
                     return
                 else:
@@ -1266,17 +1231,11 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_session["checking"]:
         user_session["checking"] = False
         
-        # NEW: Get approved cards before stopping
-        approved_cards = []
+        # Stop processor
         if user_session.get("processor"):
-            approved_cards = user_session["processor"].get_approved_cards()
             user_session["processor"].stop_processing()
         
         await safe_send_message(update, "🛑 Checking stopped!")
-        
-        # NEW: Send approved cards
-        if approved_cards:
-            send_approved_cards_file(user_session, approved_cards)
     else:
         await safe_send_message(update, "❌ No active checking session!")
 
@@ -2329,7 +2288,7 @@ def main():
     logger.info(f"👤 User thread pool workers: {USER_MAX_WORKERS}")
     logger.info(f"👥 Max concurrent users: {MAX_CONCURRENT_USERS}")
     logger.info(f"⏰ Request timeout: {REQUEST_TIMEOUT}s")
-    logger.info(f"💡 System optimized for 5 users with approved cards results file")
+    logger.info(f"💡 System optimized for 5 users with real-time live card sending")
     
     # Start health server for Render
     create_health_server()
@@ -2389,7 +2348,7 @@ def main():
             application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
             
-            logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+            logger.info("✅ Bot is running with 5 user limit and real-time live card sending...")
             
             # Run the bot with proper shutdown handling
             application.run_polling(
