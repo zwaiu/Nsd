@@ -8,7 +8,7 @@ import os
 import json
 import threading
 import asyncio
-# FIXED: Correct import syntax for python-telegram-bot
+# FIXED: Updated imports for python-telegram-bot v20+
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from concurrent.futures import ThreadPoolExecutor
@@ -2277,9 +2277,16 @@ def main():
     
     cleanup_expired_rentals()
     
+    # FIXED: Updated application builder for python-telegram-bot v20+
     while True:
         try:
-            application = Application.builder().token(BOT_TOKEN).build()
+            # Create application with proper configuration
+            application = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .concurrent_updates(True)
+                .build()
+            )
             
             application.add_error_handler(error_handler)
             
@@ -2312,11 +2319,12 @@ def main():
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
             
             logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+            
+            # FIXED: Updated polling method for v20+
             application.run_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
-                poll_interval=1.0,
-                timeout=20
+                close_loop=False
             )
             
         except Exception as e:
