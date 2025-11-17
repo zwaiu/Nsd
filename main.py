@@ -8,7 +8,7 @@ import os
 import json
 import threading
 import asyncio
-python-telegram-bot
+# FIXED: Correct import syntax for python-telegram-bot
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from concurrent.futures import ThreadPoolExecutor
