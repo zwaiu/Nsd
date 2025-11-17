@@ -9,7 +9,7 @@ import json
 import threading
 import asyncio
 
-# FIXED: Use a different approach - import specific components to avoid the Updater issue
+# FIXED: Compatible imports for python-telegram-bot 20.7
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     ApplicationBuilder, 
@@ -2273,6 +2273,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
+# FIXED: Simplified main function for Python 3.11.9 compatibility
 def main():
     """Main function to run the bot with optimized multi-user performance"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
@@ -2286,57 +2287,60 @@ def main():
     
     cleanup_expired_rentals()
     
-    # FIXED: COMPLETELY NEW APPROACH - Use ApplicationBuilder directly
-    while True:
-        try:
-            # Create application using ApplicationBuilder (more compatible)
-            application = (
-                ApplicationBuilder()
-                .token(BOT_TOKEN)
-                .concurrent_updates(True)
-                .build()
-            )
-            
-            # Add error handler
-            application.add_error_handler(error_handler)
-            
-            # Add handlers
-            application.add_handler(CommandHandler("start", start_command))
-            application.add_handler(CommandHandler("stop", stop_command))
-            application.add_handler(CommandHandler("stats", stats_command))
-            application.add_handler(CommandHandler("myaccess", myaccess_command))
-            application.add_handler(CommandHandler("bin", bin_command))
-            application.add_handler(CommandHandler("gen", gen_command))
-            application.add_handler(CommandHandler("active", active_command))
-            application.add_handler(CommandHandler("system", system_command))
-            application.add_handler(CommandHandler("cmds", cmds_command))
-            application.add_handler(CommandHandler("help", cmds_command))
-            
-            # Add admin commands
-            application.add_handler(CommandHandler("adduser", add_user_command))
-            application.add_handler(CommandHandler("addrental", add_rental_command))
-            application.add_handler(CommandHandler("listusers", list_users_command))
-            application.add_handler(CommandHandler("listrentals", list_rentals_command))
-            application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
-            application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
-            application.add_handler(CommandHandler("removeuser", remove_user_command))
-            application.add_handler(CommandHandler("removerental", remove_rental_command))
-            
-            application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
-            
-            application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
-            application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
-            
-            logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
-            
-            # FIXED: Use the most basic polling approach
-            application.run_polling()
-            
-        except Exception as e:
-            logger.error(f"Bot crashed with error: {e}")
-            logger.info("🔄 Restarting bot in 5 seconds...")
-            time.sleep(5)
+    try:
+        # Create application using ApplicationBuilder
+        application = (
+            ApplicationBuilder()
+            .token(BOT_TOKEN)
+            .concurrent_updates(True)
+            .build()
+        )
+        
+        # Add error handler
+        application.add_error_handler(error_handler)
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("stop", stop_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("myaccess", myaccess_command))
+        application.add_handler(CommandHandler("bin", bin_command))
+        application.add_handler(CommandHandler("gen", gen_command))
+        application.add_handler(CommandHandler("active", active_command))
+        application.add_handler(CommandHandler("system", system_command))
+        application.add_handler(CommandHandler("cmds", cmds_command))
+        application.add_handler(CommandHandler("help", cmds_command))
+        
+        # Add admin commands
+        application.add_handler(CommandHandler("adduser", add_user_command))
+        application.add_handler(CommandHandler("addrental", add_rental_command))
+        application.add_handler(CommandHandler("listusers", list_users_command))
+        application.add_handler(CommandHandler("listrentals", list_rentals_command))
+        application.add_handler(CommandHandler("listusers_with_names", list_users_with_names_command))
+        application.add_handler(CommandHandler("listrentals_with_names", list_rentals_with_names_command))
+        application.add_handler(CommandHandler("removeuser", remove_user_command))
+        application.add_handler(CommandHandler("removerental", remove_rental_command))
+        
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
+        
+        application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
+        application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
+        
+        logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+        
+        # Start polling with basic configuration
+        application.run_polling(
+            poll_interval=1,
+            timeout=20,
+            drop_pending_updates=True
+        )
+        
+    except Exception as e:
+        logger.error(f"Bot crashed with error: {e}")
+        logger.info("🔄 Restarting bot in 5 seconds...")
+        time.sleep(5)
+        main()  # Restart
 
 if __name__ == "__main__":
     main()
