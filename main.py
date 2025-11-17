@@ -8,6 +8,7 @@ import os
 import json
 import threading
 import asyncio
+import sys
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2298,7 +2299,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Failed to send error message to user: {e}")
 
-# FIXED: Main function with better exception handling and resource cleanup
+# Add this function to handle event loop issues
+def async_error_handler(loop, context):
+    """Handle asyncio errors gracefully"""
+    try:
+        exception = context.get('exception')
+        if exception:
+            logger.error(f"Asyncio error: {exception}")
+        else:
+            logger.error(f"Asyncio context error: {context}")
+    except:
+        pass
+
+# FIXED: Main function with proper asyncio event loop handling
 def main():
     """Main function to run the bot with optimized multi-user performance"""
     logger.info("🤖 Multi-User Stripe Auth Checker Bot Starting...")
@@ -2312,8 +2325,27 @@ def main():
     
     cleanup_expired_rentals()
     
-    while True:
+    # Set event loop policy for Windows compatibility
+    if sys.platform.startswith('win'):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    max_retries = 10
+    retry_delay = 10
+    
+    for retry in range(max_retries):
         try:
+            # Create new event loop for each attempt
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("Loop is closed")
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            # Set error handler
+            loop.set_exception_handler(async_error_handler)
+            
             application = Application.builder().token(BOT_TOKEN).build()
             
             application.add_error_handler(error_handler)
@@ -2347,20 +2379,49 @@ def main():
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
             
             logger.info("✅ Bot is running with 5 user limit and approved cards results file...")
+            
+            # Run the bot with proper shutdown handling
             application.run_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
                 poll_interval=1.0,
-                timeout=30,  # Increased timeout
+                timeout=30,
                 read_timeout=30,
                 write_timeout=30,
-                connect_timeout=30
+                connect_timeout=30,
+                close_loop=False  # Important: don't close the loop
             )
             
+        except KeyboardInterrupt:
+            logger.info("🛑 Bot stopped by user")
+            break
         except Exception as e:
             logger.error(f"Bot crashed with error: {e}")
-            logger.info("🔄 Restarting bot in 10 seconds...")
-            time.sleep(10)
+            
+            # Clean up resources
+            try:
+                global_thread_pool.shutdown(wait=False)
+            except:
+                pass
+            
+            if retry < max_retries - 1:
+                logger.info(f"🔄 Restarting bot in {retry_delay} seconds... (Attempt {retry + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                # Increase delay for subsequent retries
+                retry_delay = min(retry_delay * 1.5, 60)  # Cap at 60 seconds
+            else:
+                logger.error("❌ Max retries reached. Bot stopped.")
+                break
+    
+    # Final cleanup
+    try:
+        global_thread_pool.shutdown(wait=True)
+        # Close global session
+        global_session.close()
+    except:
+        pass
+    
+    logger.info("👋 Bot shutdown complete")
 
 if __name__ == "__main__":
     main()
