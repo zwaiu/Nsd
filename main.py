@@ -346,9 +346,9 @@ class UserCardProcessor:
                 status_text = "Approved ✅" if card_type == 'cvv_live' else "CCN Live 🔵"
                 
                 # Format exactly as requested with bold BIN info and mono font for card only
-                message = f"""CARD: <code>{number}|{exp_month}|{exp_year}|{cvv}</code>
+                message = f"""<code>Card: {number}|{exp_month}|{exp_year}|{cvv}</code>
 Status: {status_text}
-Response: Card added successfully
+Response: Card added
 
 <b>BIN:</b> {bin_info.get('BIN', number[:6])}
 <b>Brand:</b> {bin_info.get('Brand', 'UNKNOWN')}
@@ -1278,8 +1278,12 @@ async def handle_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
 
+# FIXED: Start command now starts checking if file exists
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the /start command"""
+    """Handle the /start command - now also starts checking if file exists"""
+    chat_id = update.message.chat_id
+    
+    # First send the welcome message
     await safe_send_message(
         update,
         " <b>Mang Biroy AUTH</b>\n\n"
@@ -1288,6 +1292,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Use /cmds to see all commands\n"
         "DM @mcchiatoos for any problem"
     )
+    
+    # Then check if user has a file and can start checking
+    if not await check_access(update):
+        return
+        
+    user_file = f"cc_{chat_id}.txt"
+    if os.path.exists(user_file):
+        await safe_send_message(
+            update,
+            "✅ File detected! Starting check now..."
+        )
+        # Start the checking process
+        await start_checking(update, context)
+
+# NEW: Add check command for explicit checking
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /check command to start checking cards"""
+    await start_checking(update, context)
 
 # FIXED: Stop command with better session management
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1940,7 +1962,8 @@ async def cmds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message = "🤖 <b>Available Commands</b>\n\n"
     message += "📁 <b>Send cc.txt file</b> - Start checking\n"
-    message += "/start - Start the bot\n"
+    message += "/start - Start the bot and check if file exists\n"
+    message += "/check - Start checking cards immediately\n"
     message += "/stop - Stop current checking\n"
     message += "/stats - Show current stats\n"
     message += "/myaccess - Check your access status\n"
@@ -2154,7 +2177,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_send_message(
             update,
             f"✅ File received: {document.file_name}\n"
-            f"Use /start to begin checking\n"
+            f"Use /start or /check to begin checking\n"
             f"Max cards: {MAX_CARDS_LIMIT}"
         )
     else:
@@ -2189,7 +2212,8 @@ async def start_checking(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not os.path.exists(user_file):
             await safe_send_message(
                 update,
-                "📁 <b>Send cc.txt file with cards to check.</b>\n\n"
+                "📁 <b>No card file found!</b>\n\n"
+                "Please send a cc.txt file first with cards to check.\n\n"
                 "Format:\n<code>card|mm|yy|cvv</code>\n\n"
                 "DM @mcchiatoos for any problem"
             )
@@ -2390,8 +2414,9 @@ def main():
             
             application.add_error_handler(error_handler)
             
-            # Add handlers
+            # Add handlers - FIXED: Now includes /check command and proper text handling
             application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("check", check_command))  # NEW: Add check command
             application.add_handler(CommandHandler("stop", stop_command))
             application.add_handler(CommandHandler("stats", stats_command))
             application.add_handler(CommandHandler("myaccess", myaccess_command))
@@ -2412,13 +2437,18 @@ def main():
             application.add_handler(CommandHandler("removeuser", remove_user_command))
             application.add_handler(CommandHandler("removerental", remove_rental_command))
             
+            # File handler
             application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start_checking))
+            
+            # Text handler - only handle specific start words to avoid conflicts
+            application.add_handler(MessageHandler(filters.Regex(r'^(start|check|go)$'), start_checking))
             
             application.add_handler(CallbackQueryHandler(handle_stop_callback, pattern=r'^stop_masschk_'))
             application.add_handler(CallbackQueryHandler(handle_noop_callback, pattern=r'^noop$'))
             
             logger.info("✅ Bot is running with 5 user limit and real-time live card sending...")
+            logger.info("✅ Fixed: /start now automatically checks if file exists and starts checking")
+            logger.info("✅ Added: /check command for explicit checking")
             
             # Run the bot with proper shutdown handling
             application.run_polling(
