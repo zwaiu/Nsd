@@ -285,7 +285,7 @@ class UserCardProcessor:
 
     # NEW METHOD: Send live card immediately when found
     def _send_live_card_immediately(self, card, bin_info, card_type):
-        """Send live card immediately to user"""
+        """Send live card immediately to user with error handling"""
         try:
             chat_id = self.user_session["chat_id"]
             
@@ -300,8 +300,8 @@ class UserCardProcessor:
                 # Determine status text based on card type
                 status_text = "Approved ✅" if card_type == 'cvv_live' else "CCN Live 🔵"
                 
-                # Format exactly as requested with bold BIN info
-                message = f"""Card: {number}|{exp_month}|{exp_year}|{cvv}
+                # Format exactly as requested with bold BIN info and mono font for card only
+                message = f"""<code>Card: {number}|{exp_month}|{exp_year}|{cvv}</code>
 Status: {status_text}
 Response: Card added
 
@@ -765,7 +765,7 @@ def get_rental_time_left_detailed(expiry_timestamp):
     return days, hours, minutes
 
 def send_error_log_sync(error_message):
-    """Send error log to logging bot with rate limiting"""
+    """Send error log to logging bot with rate limiting and better error handling"""
     try:
         site_match = re.search(r'Gateway Error on (.*?):', error_message)
         if site_match:
@@ -790,10 +790,39 @@ def send_error_log_sync(error_message):
             'text': f"🚨 {error_message}",
             'parse_mode': 'HTML'
         }
-        response = global_session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
-        return response
+        
+        # Use a fresh session for error logs to avoid connection issues
+        max_retries = 2
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                session = create_session()
+                response = session.post(url, json=params, timeout=10)
+                session.close()
+                
+                if response.status_code == 200:
+                    return response  # Success
+                else:
+                    logger.warning(f"Failed to send error log (attempt {attempt + 1}): {response.text}")
+                    last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
+                    
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                logger.warning(f"Connection error sending error log (attempt {attempt + 1}/{max_retries}): {e}")
+                last_exception = e
+            except Exception as e:
+                logger.error(f"Error sending error log (attempt {attempt + 1}): {e}")
+                last_exception = e
+                break  # Don't retry for other errors
+            
+            if attempt < max_retries - 1:
+                time.sleep(1)
+        
+        logger.error(f"Failed to send error log after {max_retries} attempts: {last_exception}")
+        return None
+            
     except Exception as e:
-        logger.error(f"Error sending error log: {e}")
+        logger.error(f"Error in send_error_log_sync: {e}")
         return None
 
 def is_authorized(user_id):
@@ -949,48 +978,89 @@ def fetch_bin_info(card_number):
 
 def send_telegram_message_sync(message, chat_id, parse_mode='HTML', reply_markup=None):
     """Sync version of telegram message sending with better error handling"""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        params = {
-            'chat_id': chat_id,
-            'text': message,
-            'parse_mode': parse_mode
-        }
-        if reply_markup:
-            params['reply_markup'] = reply_markup.to_json()
-        response = global_session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
-        
-        # Log if there's an error
-        if response.status_code != 200:
-            logger.warning(f"Failed to send message to chat {chat_id}: {response.text}")
+    max_retries = 2
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            params = {
+                'chat_id': chat_id,
+                'text': message,
+                'parse_mode': parse_mode
+            }
+            if reply_markup:
+                params['reply_markup'] = reply_markup.to_json()
             
-        return response
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return None
+            # Use a fresh session for each attempt
+            session = create_session()
+            response = session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
+            session.close()
+            
+            # Log if there's an error
+            if response.status_code == 200:
+                return response  # Success, return immediately
+            else:
+                logger.warning(f"Failed to send message to chat {chat_id} (attempt {attempt + 1}): {response.text}")
+                last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
+                
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logger.warning(f"Connection error sending message (attempt {attempt + 1}/{max_retries}): {e}")
+            last_exception = e
+        except Exception as e:
+            logger.error(f"Error sending message (attempt {attempt + 1}): {e}")
+            last_exception = e
+            break  # Don't retry for other types of errors
+        
+        # Wait before retry (except on last attempt)
+        if attempt < max_retries - 1:
+            time.sleep(1)
+    
+    logger.error(f"Failed to send message after {max_retries} attempts: {last_exception}")
+    return None
 
 def edit_telegram_message_sync(message, chat_id, message_id, parse_mode='HTML', reply_markup=None):
     """Sync version of telegram message editing with better error handling"""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-        params = {
-            'chat_id': chat_id,
-            'message_id': message_id,
-            'text': message,
-            'parse_mode': parse_mode
-        }
-        if reply_markup:
-            params['reply_markup'] = reply_markup.to_json()
-        response = global_session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
-        
-        # Log if there's an error
-        if response.status_code != 200:
-            logger.warning(f"Failed to edit message {message_id} for chat {chat_id}: {response.text}")
+    max_retries = 2
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+            params = {
+                'chat_id': chat_id,
+                'message_id': message_id,
+                'text': message,
+                'parse_mode': parse_mode
+            }
+            if reply_markup:
+                params['reply_markup'] = reply_markup.to_json()
             
-        return response
-    except Exception as e:
-        logger.error(f"Error editing message: {e}")
-        return None
+            # Use a fresh session for each attempt
+            session = create_session()
+            response = session.post(url, json=params, timeout=TELEGRAM_TIMEOUT)
+            session.close()
+            
+            if response.status_code == 200:
+                return response  # Success, return immediately
+            else:
+                logger.warning(f"Failed to edit message {message_id} for chat {chat_id} (attempt {attempt + 1}): {response.text}")
+                last_exception = Exception(f"HTTP {response.status_code}: {response.text}")
+                
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            logger.warning(f"Connection error editing message (attempt {attempt + 1}/{max_retries}): {e}")
+            last_exception = e
+        except Exception as e:
+            logger.error(f"Error editing message (attempt {attempt + 1}): {e}")
+            last_exception = e
+            break  # Don't retry for other types of errors
+        
+        # Wait before retry (except on last attempt)
+        if attempt < max_retries - 1:
+            time.sleep(1)
+    
+    logger.error(f"Failed to edit message after {max_retries} attempts: {last_exception}")
+    return None
 
 def generate_uuids():
     return {"gu": str(uuid.uuid4()), "mu": str(uuid.uuid4()), "si": str(uuid.uuid4())}
